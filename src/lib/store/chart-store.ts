@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Timeframe } from "@/lib/binance/types";
+import type { Timeframe } from "@/lib/types/market";
 
 export type IndicatorKey =
   | "ema20"
@@ -50,16 +50,16 @@ export const INDICATOR_COLORS: Record<IndicatorKey, string> = {
 };
 
 export const DEFAULT_WATCHLIST = [
-  "BTCUSDT",
-  "ETHUSDT",
-  "SOLUSDT",
-  "BNBUSDT",
-  "XRPUSDT",
-  "DOGEUSDT",
-  "ADAUSDT",
-  "AVAXUSDT",
-  "LINKUSDT",
-  "MATICUSDT",
+  "EURUSD",
+  "GBPUSD",
+  "USDJPY",
+  "USDCHF",
+  "AUDUSD",
+  "USDCAD",
+  "NZDUSD",
+  "EURGBP",
+  "EURJPY",
+  "GBPJPY",
 ];
 
 interface ChartState {
@@ -99,8 +99,8 @@ interface ChartState {
 export const useChartStore = create<ChartState>()(
   persist(
     (set) => ({
-      symbol: "BTCUSDT",
-      timeframe: "15m" as Timeframe,
+      symbol: "EURUSD",
+      timeframe: "1m" as Timeframe,
       indicators: {
         ema20: true,
         ema50: true,
@@ -178,7 +178,7 @@ export const useChartStore = create<ChartState>()(
       setSettingsTarget: (settingsTarget) => set({ settingsTarget }),
     }),
     {
-      name: "tv-gratis-chart-state",
+      name: "ttp-gratis-chart-state",
       partialize: (s) => ({
         symbol: s.symbol,
         timeframe: s.timeframe,

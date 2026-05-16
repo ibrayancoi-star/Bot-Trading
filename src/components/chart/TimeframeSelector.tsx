@@ -1,7 +1,7 @@
 "use client";
 
 import { useChartStore } from "@/lib/store/chart-store";
-import type { Timeframe } from "@/lib/binance/types";
+import type { Timeframe } from "@/lib/types/market";
 import { cn } from "@/lib/utils";
 
 const TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"];

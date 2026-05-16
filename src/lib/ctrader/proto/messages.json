@@ -1,0 +1,174 @@
+{
+  "nested": {
+    "ProtoMessage": {
+      "edition": "proto2",
+      "fields": {
+        "payloadType": {
+          "rule": "required",
+          "type": "uint32",
+          "id": 1
+        },
+        "payload": {
+          "type": "bytes",
+          "id": 2
+        },
+        "clientMsgId": {
+          "type": "string",
+          "id": 3
+        }
+      }
+    },
+    "ProtoOAApplicationAuthReq": {
+      "edition": "proto2",
+      "fields": {
+        "clientId": {
+          "rule": "required",
+          "type": "string",
+          "id": 1
+        },
+        "clientSecret": {
+          "rule": "required",
+          "type": "string",
+          "id": 2
+        }
+      }
+    },
+    "ProtoOAApplicationAuthRes": {
+      "edition": "proto2",
+      "fields": {}
+    },
+    "ProtoOAAccountAuthReq": {
+      "edition": "proto2",
+      "fields": {
+        "ctidTraderAccountId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 1
+        },
+        "accessToken": {
+          "rule": "required",
+          "type": "string",
+          "id": 2
+        }
+      }
+    },
+    "ProtoOAAccountAuthRes": {
+      "edition": "proto2",
+      "fields": {
+        "ctidTraderAccountId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 1
+        }
+      }
+    },
+    "ProtoOASpotEvent": {
+      "edition": "proto2",
+      "fields": {
+        "ctidTraderAccountId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 1
+        },
+        "symbolId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 2
+        },
+        "bid": {
+          "type": "int64",
+          "id": 3
+        },
+        "ask": {
+          "type": "int64",
+          "id": 4
+        },
+        "trendbar": {
+          "type": "string",
+          "id": 5
+        },
+        "timestamp": {
+          "type": "uint64",
+          "id": 6
+        }
+      }
+    },
+    "ProtoOANewOrderReq": {
+      "edition": "proto2",
+      "fields": {
+        "ctidTraderAccountId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 1
+        },
+        "symbolId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 2
+        },
+        "orderType": {
+          "rule": "required",
+          "type": "uint32",
+          "id": 3
+        },
+        "tradeSide": {
+          "rule": "required",
+          "type": "uint32",
+          "id": 4
+        },
+        "volume": {
+          "rule": "required",
+          "type": "int64",
+          "id": 5
+        },
+        "clientOrderId": {
+          "type": "string",
+          "id": 6
+        },
+        "relativeStopLoss": {
+          "type": "int64",
+          "id": 7
+        },
+        "relativeTakeProfit": {
+          "type": "int64",
+          "id": 8
+        }
+      }
+    },
+    "ProtoOAExecutionEvent": {
+      "edition": "proto2",
+      "fields": {
+        "ctidTraderAccountId": {
+          "rule": "required",
+          "type": "int64",
+          "id": 1
+        },
+        "executionType": {
+          "rule": "required",
+          "type": "uint32",
+          "id": 2
+        },
+        "orderId": {
+          "type": "int64",
+          "id": 3
+        },
+        "positionId": {
+          "type": "int64",
+          "id": 4
+        },
+        "volume": {
+          "type": "int64",
+          "id": 5
+        },
+        "executionPrice": {
+          "type": "int64",
+          "id": 6
+        }
+      }
+    },
+    "ProtoHeartbeatEvent": {
+      "edition": "proto2",
+      "fields": {}
+    }
+  }
+}

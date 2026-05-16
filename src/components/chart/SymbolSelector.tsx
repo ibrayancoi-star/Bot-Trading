@@ -11,10 +11,10 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { fetchExchangeSymbols } from "@/lib/binance/rest";
+import { fetchMockExchangeSymbols } from "@/lib/data/mock-feed";
 import { useChartStore } from "@/lib/store/chart-store";
 import { cn } from "@/lib/utils";
-import type { SymbolInfo } from "@/lib/binance/types";
+import type { SymbolInfo } from "@/lib/types/market";
 
 export function SymbolSelector() {
   const symbol = useChartStore((s) => s.symbol);
@@ -28,7 +28,7 @@ export function SymbolSelector() {
 
   useEffect(() => {
     if (open && allSymbols.length === 0) {
-      fetchExchangeSymbols().then(setAllSymbols).catch(console.error);
+      fetchMockExchangeSymbols().then(setAllSymbols).catch(console.error);
     }
   }, [open, allSymbols.length]);
 

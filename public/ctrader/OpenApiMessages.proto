@@ -1,0 +1,65 @@
+syntax = "proto2";
+
+// Wrapper principal para todos los mensajes WebSocket de cTrader
+message ProtoMessage {
+    required uint32 payloadType = 1;
+    optional bytes payload = 2;
+    optional string clientMsgId = 3;
+}
+
+// 2100: Auth Req
+message ProtoOAApplicationAuthReq {
+    required string clientId = 1;
+    required string clientSecret = 2;
+}
+
+// 2101: Auth Res
+message ProtoOAApplicationAuthRes {
+}
+
+// 2102: Account Auth Req
+message ProtoOAAccountAuthReq {
+    required int64 ctidTraderAccountId = 1;
+    required string accessToken = 2;
+}
+
+// 2103: Account Auth Res
+message ProtoOAAccountAuthRes {
+    required int64 ctidTraderAccountId = 1;
+}
+
+// 2131: Market Data Event (Cotizaciones en vivo)
+message ProtoOASpotEvent {
+    required int64 ctidTraderAccountId = 1;
+    required int64 symbolId = 2;
+    optional int64 bid = 3;
+    optional int64 ask = 4;
+    optional string trendbar = 5;
+    optional uint64 timestamp = 6;
+}
+
+// 2106: New Order Req
+message ProtoOANewOrderReq {
+    required int64 ctidTraderAccountId = 1;
+    required int64 symbolId = 2;
+    required uint32 orderType = 3; // 1 = MARKET
+    required uint32 tradeSide = 4; // 1 = BUY, 2 = SELL
+    required int64 volume = 5;
+    optional string clientOrderId = 6;
+    optional int64 relativeStopLoss = 7;
+    optional int64 relativeTakeProfit = 8;
+}
+
+// 2126: Execution Event
+message ProtoOAExecutionEvent {
+    required int64 ctidTraderAccountId = 1;
+    required uint32 executionType = 2; // 1 = ORDER_ACCEPTED, 2 = ORDER_FILLED...
+    optional int64 orderId = 3;
+    optional int64 positionId = 4;
+    optional int64 volume = 5;
+    optional int64 executionPrice = 6;
+}
+
+// 51: Heartbeat
+message ProtoHeartbeatEvent {
+}

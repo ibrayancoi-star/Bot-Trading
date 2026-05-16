@@ -1,4 +1,4 @@
-import type { Candle } from "@/lib/binance/types";
+import type { Candle } from "@/lib/types/market";
 
 export interface IndicatorPoint {
   time: number;

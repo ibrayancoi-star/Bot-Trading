@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
-import { fetchTickers24h } from "@/lib/binance/rest";
-import { getBinanceWS } from "@/lib/binance/ws";
+import { fetchMockTickers, subscribeMockTickers } from "@/lib/data/mock-feed";
 import { useChartStore } from "@/lib/store/chart-store";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { formatPrice, formatPct } from "@/lib/format";
@@ -28,7 +27,7 @@ export function Watchlist() {
     if (watchlist.length === 0) return;
     let cancelled = false;
 
-    fetchTickers24h(watchlist)
+    fetchMockTickers(watchlist)
       .then((tickers) => {
         if (cancelled) return;
         const map: Record<string, Row> = {};
@@ -43,8 +42,7 @@ export function Watchlist() {
       })
       .catch(console.error);
 
-    const ws = getBinanceWS();
-    const unsub = ws.subscribeMiniTickers(watchlist, (tick) => {
+    const unsub = subscribeMockTickers(watchlist, (tick) => {
       setRows((prev) => {
         const prevRow = prev[tick.symbol];
         if (prevRow) {
@@ -119,9 +117,8 @@ export function Watchlist() {
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-tv-text">
-                    {s.replace("USDT", "")}
+                    {s}
                   </span>
-                  <span className="text-[10px] text-tv-text-dim">USDT</span>
                 </div>
                 <span
                   className={cn(
