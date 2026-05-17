@@ -706,8 +706,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
     return () => {
       if (unsub) unsub();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [symbol, timeframe]);
 
   const greenOrRed = (n: number) =>
     n >= 0 ? "text-tv-green" : "text-tv-red";

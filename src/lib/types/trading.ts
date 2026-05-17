@@ -32,6 +32,11 @@ export interface BrokerConnection {
   status: BrokerConnectionStatus;
   lastSync?: number;
   error?: string;
+  metadata?: {
+    server: string;
+    login: number;
+    currency: string;
+  };
 }
 
 export interface TradeResult {
