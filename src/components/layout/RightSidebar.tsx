@@ -1,102 +1,79 @@
 "use client";
 
+import { useState } from "react";
 import { useTradingStore } from "@/lib/store/trading-store";
 import { useChartStore } from "@/lib/store/chart-store";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { TrendingUp, TrendingDown, Trash2 } from "lucide-react";
 import { AccountStats } from "@/components/dashboard/AccountStats";
+import { sendTradeOrder } from "@/lib/data/mock-feed";
+import { cn } from "@/lib/utils";
 
 export function RightSidebar() {
-  const { addPosition, positions, closePosition, isBotActive, toggleBot } = useTradingStore();
+  const { accountType, setAccountType, positions, isBotActive, toggleBot, connection, account } = useTradingStore();
   const symbol = useChartStore((s) => s.symbol);
 
-  const handleTrade = async (type: "BUY" | "SELL") => {
-    // Para simplificar, asumimos un precio base, en un entorno real vendría del feed
-    const mockPrice = 1.08 + (Math.random() - 0.5) * 0.01;
-    
-    try {
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer ttp-secret-token" // Simulación de Auth
-        },
-        body: JSON.stringify({
-          action: "OPEN",
-          symbol,
-          type,
-          lotSize: 1.0,
-          price: mockPrice
-        })
-      });
+  const [lotSize, setLotSize] = useState<number>(0.1);
+  const [tp, setTp] = useState<number>(0);
+  const [sl, setSl] = useState<number>(0);
 
-      const data = await res.json();
-      
-      if (data.success) {
-        addPosition({
-          id: data.data.orderId,
-          symbol: data.data.symbol,
-          type: data.data.type,
-          lotSize: data.data.lotSize,
-          entryPrice: data.data.executionPrice,
-          currentPrice: data.data.executionPrice,
-          pnl: 0,
-        });
-      } else {
-        console.error("Error del broker:", data.error);
-      }
-    } catch (err) {
-      console.error("Error de conexión con el API:", err);
-    }
+  const handleTrade = (type: "buy" | "sell") => {
+    sendTradeOrder(symbol, type, lotSize, tp, sl);
   };
 
-  const handleCloseLastPosition = async () => {
+  const handleCloseLastPosition = () => {
     const last = positions[positions.length - 1];
-    if (!last) return;
+    if (!last || !last.ticket) return;
 
-    try {
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": "Bearer ttp-secret-token"
-        },
-        body: JSON.stringify({
-          action: "CLOSE",
-          orderId: last.id,
-          symbol: last.symbol,
-          type: last.type,
-          lotSize: last.lotSize,
-          price: last.entryPrice + 0.0001 // Mock exit price
-        })
-      });
-
-      const data = await res.json();
-
-      if (data.success) {
-        closePosition(last.id, {
-          id: last.id,
-          symbol: last.symbol,
-          type: last.type,
-          entryPrice: last.entryPrice,
-          exitPrice: data.data.closePrice,
-          lotSize: last.lotSize,
-          pnl: 10, // Mock PnL para el cierre manual
-          pnlPercentage: 0.1,
-          duration: 60,
-          closedAt: data.data.timestamp,
-        });
-      }
-    } catch (err) {
-      console.error("Error cerrando posición en API:", err);
-    }
+    const action = last.type === "BUY" ? "sell" : "buy";
+    sendTradeOrder(last.symbol, action, last.lotSize, 0, 0); // Cerrar posicion abriendo orden opuesta o usar endpoint especifico
   };
 
   return (
     <aside className="flex w-64 flex-col border-l border-tv-border bg-tv-panel overflow-y-auto overflow-x-hidden">
+      
+      {/* Account Switcher */}
+      <div className="p-4 flex items-center justify-between bg-tv-bg/80">
+        <div className="flex gap-1 bg-tv-bg p-1 rounded-md w-full">
+          <button
+            onClick={() => setAccountType("real")}
+            className={cn(
+              "flex-1 text-[10px] font-semibold py-1.5 rounded-sm transition-all",
+              accountType === "real" ? "bg-tv-blue text-white shadow" : "text-tv-text-muted hover:text-tv-text"
+            )}
+          >
+            REAL
+          </button>
+          <button
+            onClick={() => setAccountType("fondeo")}
+            className={cn(
+              "flex-1 text-[10px] font-semibold py-1.5 rounded-sm transition-all",
+              accountType === "fondeo" ? "bg-tv-blue text-white shadow" : "text-tv-text-muted hover:text-tv-text"
+            )}
+          >
+            FONDEO
+          </button>
+          <button
+            onClick={() => setAccountType("demo")}
+            className={cn(
+              "flex-1 text-[10px] font-semibold py-1.5 rounded-sm transition-all",
+              accountType === "demo" ? "bg-tv-blue text-white shadow" : "text-tv-text-muted hover:text-tv-text"
+            )}
+          >
+            DEMO
+          </button>
+        </div>
+      </div>
+
+      {/* Connection Info */}
+      <div className="px-4 pb-2 text-[10px] text-tv-text-muted flex justify-between items-center">
+        <span>{account.server || "Broker Server"}</span>
+        <span className="font-mono">{account.login || "---"}</span>
+      </div>
+
       {/* Account Stats Panel */}
-      <div className="flex flex-col items-start w-full py-4 space-y-4">
+      <div className="flex flex-col items-start w-full py-2 space-y-4">
         <AccountStats />
       </div>
 
@@ -108,15 +85,16 @@ export function RightSidebar() {
           <h3 className="text-[11px] font-semibold uppercase tracking-wider text-tv-text-muted">
             Auto Trading
           </h3>
-          <div className={`h-2.5 w-2.5 rounded-full ${isBotActive ? "bg-tv-green animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]" : "bg-tv-red"}`} />
+          <div className={cn("h-2.5 w-2.5 rounded-full", isBotActive ? "bg-tv-green animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]" : "bg-tv-red")} />
         </div>
         <Button
           onClick={toggleBot}
-          className={`w-full h-10 text-xs font-bold transition-all ${
+          className={cn(
+            "w-full h-10 text-xs font-bold transition-all",
             isBotActive
               ? "bg-tv-red/10 text-tv-red border border-tv-red/20 hover:bg-tv-red hover:text-white"
               : "bg-tv-blue/10 text-tv-blue border border-tv-blue/20 hover:bg-tv-blue hover:text-white"
-          }`}
+          )}
         >
           {isBotActive ? "DETENER BOT" : "INICIAR BOT"}
         </Button>
@@ -130,20 +108,57 @@ export function RightSidebar() {
           Ejecución de Mercado
         </h3>
         
+        {/* Configuración de Orden */}
+        <div className="flex flex-col gap-3 mb-4">
+          <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
+            <span className="text-xs text-tv-text-muted">Lotaje</span>
+            <input 
+              type="number" 
+              step="0.01" 
+              min="0.01"
+              value={lotSize} 
+              onChange={(e) => setLotSize(parseFloat(e.target.value) || 0)}
+              className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-16"
+            />
+          </div>
+          <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
+            <span className="text-xs text-tv-text-muted">TP Price</span>
+            <input 
+              type="number" 
+              step="0.0001" 
+              value={tp} 
+              onChange={(e) => setTp(parseFloat(e.target.value) || 0)}
+              className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-24"
+            />
+          </div>
+          <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
+            <span className="text-xs text-tv-text-muted">SL Price</span>
+            <input 
+              type="number" 
+              step="0.0001" 
+              value={sl} 
+              onChange={(e) => setSl(parseFloat(e.target.value) || 0)}
+              className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-24"
+            />
+          </div>
+        </div>
+
         <div className="flex flex-col gap-3">
           <Button
-            onClick={() => handleTrade("BUY")}
-            className="h-16 w-full bg-emerald-600 text-white hover:bg-emerald-500 transition-all flex flex-col gap-1 border-0 shadow-md"
+            onClick={() => handleTrade("buy")}
+            disabled={connection.status !== "connected"}
+            className="h-14 w-full bg-emerald-600 text-white hover:bg-emerald-500 transition-all flex flex-col gap-0 border-0 shadow-md"
           >
-            <TrendingUp className="h-5 w-5" />
-            <span className="text-xs font-bold">BUY {symbol} 1.00 Lot</span>
+            <TrendingUp className="h-4 w-4 mb-0.5" />
+            <span className="text-xs font-bold">BUY {symbol}</span>
           </Button>
           <Button
-            onClick={() => handleTrade("SELL")}
-            className="h-16 w-full bg-rose-600 text-white hover:bg-rose-500 transition-all flex flex-col gap-1 border-0 shadow-md"
+            onClick={() => handleTrade("sell")}
+            disabled={connection.status !== "connected"}
+            className="h-14 w-full bg-rose-600 text-white hover:bg-rose-500 transition-all flex flex-col gap-0 border-0 shadow-md"
           >
-            <TrendingDown className="h-5 w-5" />
-            <span className="text-xs font-bold">SELL {symbol} 1.00 Lot</span>
+            <TrendingDown className="h-4 w-4 mb-0.5" />
+            <span className="text-xs font-bold">SELL {symbol}</span>
           </Button>
         </div>
 
@@ -156,7 +171,7 @@ export function RightSidebar() {
               onClick={handleCloseLastPosition}
             >
               <Trash2 className="h-4 w-4" />
-              Cerrar Última Posición
+              Cerrar Última
             </Button>
           </div>
         )}

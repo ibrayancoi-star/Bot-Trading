@@ -7,7 +7,7 @@ El proyecto consiste en la creación de una plataforma de trading avanzada (tipo
 1. **Frontend (Panel de Monitoreo Visual - Next.js)**: Conserva la interfaz premium y el estado reactivo ya construidos. Se conecta a un servidor WebSocket local administrado por Python para pintar gráficos y métricas de la cuenta de forma reactiva y ultrarrápida.
 2. **Backend/Motor de Ejecución (Python + MT5)**: Un script en segundo plano (`mt5_bridge.py`) que corre localmente, se conecta de manera nativa a la terminal de escritorio de MetaTrader 5 (MT5), extrae ticks en tiempo real, procesa la lógica de las estrategias, ejecuta el control de riesgo y envía las órdenes al broker.
 
-Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTrader, eliminando las restricciones de KYC, optimizando presupuesto y facilitando el uso de cualquier cuenta demo tradicional abierta en la aplicación de escritorio de MT5.
+Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTrader, eliminando las restricciones de KYC, optimizando presupuesto y facilitando el uso de cualquier cuenta demo o real tradicional abierta en la aplicación de escritorio de MT5.
 
 ---
 
@@ -23,19 +23,32 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 - **Servidor WebSocket Local**: Servidor de alta velocidad basado en `websockets` en `ws://127.0.0.1:8000` diseñado para servir datos locales en JSON.
 - **Streaming de Cotizaciones (Market Data)**: Bucle asíncrono optimizado de alta frecuencia (10Hz) que consulta precios bid/ask para los pares **EURUSD** y **GBPUSD**, transmitiéndolos a los clientes web activos inmediatamente solo cuando hay cambios.
 - **Sincronización Financiera (Account Info)**: Transmisión en vivo y periódica del estado de la cuenta (balance, equidad, margen, apalancamiento, servidor y número de cuenta) inmediatamente al conectar y en cada actualización de equidad.
-- **Resiliencia de Conexión**: Bucle de verificación persistente para reconectar con MT5 en caso de caídas de la terminal.
+- **Resiliencia de Conexión**: Bucle de verificación persistente para reconectar con MT5 en caso de caídas de la terminal y prevención de apertura forzada.
+- **Múltiples Modos de Llenado (Filling Modes)**: Soporte para múltiples Filling Modes (IOC, FOK, RETURN) de forma secuencial y transparente para adaptarse a cualquier tipo de broker (Demo/Real/Fondeo).
+- **Detección Inteligente de Cuentas**: Detección automática del tipo de cuenta (`fondeo`, `real` o `demo`) mediante la lectura del servidor y palabras clave (`ftmo`, `funding`, `prop`, etc.).
 
 ### 3. Adaptación del Frontend y Zustand Store
 - **Feed Integrado (`mock-feed.ts`)**: Adaptado para conectarse directamente a `ws://127.0.0.1:8000`. Procesa y agrega los ticks en tiempo real en velas de 1 minuto para inyectarlas directamente al gráfico (`PriceChart.tsx`).
-- **Persistencia Reactiva (`trading-store.ts`)**: Mapeo completo de las métricas recibidas de MT5 para actualizar el balance, equidad, margen libre y evaluar en vivo los cortacircuitos de Drawdown (5% de pérdida diaria / 10% global).
-- **Indicador de Conexión en Cabecera (`Header.tsx`)**: Reemplazo del botón "Conectar cTrader" por un widget premium que muestra en vivo el estado del puente MT5:
-  - **Verde Pulsante**: Conexión activa con detalles de cuenta (`login` y `server`).
-  - **Amarillo Pulsante**: Intentando conectar con el servidor local de Python.
-  - **Rojo Estático**: Puente desconectado.
+  - **Sincronización Inteligente de Cuenta**: La pestaña del switch se autoselecciona la primera vez que se carga la página o si físicamente cambias de cuenta en MT5 (según login/server), permitiendo al usuario cambiar y permanecer manualmente en la pestaña elegida sin molestas reversiones.
+- **Persistencia Reactiva (`trading-store.ts`)**: Mapeo completo de las métricas recibidas de MT5 para actualizar el balance, equidad, margen libre y evaluar en vivo los cortacircuitos de Drawdown. Añadida la opción de cuenta `demo` en la lógica de estado.
+- **Widget Superior e Inputs**: Selector completo de tres opciones (Real / Fondeo / Demo) y campos configurables para Lotaje, Take Profit (TP) y Stop Loss (SL).
+- **Líneas de Precios en Gráfico**: Representación visual de posiciones activas incluyendo nivel de entrada con PnL dinámico flotante, líneas punteadas de TP y SL directo en el gráfico.
+
+---
+
+## 🚀 Estado del Proyecto (Actualizado Mayo-2026)
+
+| Área | Estado | Detalle |
+| :--- | :---: | :--- |
+| **Frontend UI** | ✅ COMPLETO | Switch de 3 cuentas, inputs interactivos de trading en panel lateral, visualización de métricas y balance/equity reactivo. |
+| **Integración de Gráfico** | ✅ COMPLETO | Conexión a Lightweight Charts asíncrona, velas en vivo y líneas visuales de órdenes activas (Precio, SL, TP). |
+| **Detección de Cuenta** | ✅ COMPLETO | Detección automática basada en nombre de servidor broker y trade mode de MT5 (Demo/Real/Fondeo). |
+| **Ejecución y Modificación** | ✅ COMPLETO | Soporte nativo para órdenes BUY, SELL y cancelación con fallback inteligente de Filling Modes (IOC -> FOK -> RETURN). |
+| **Persistencia del Switch** | ✅ COMPLETO | Control absoluto del usuario sobre el switch de cuenta sin reinicios cíclicos automáticos. |
 
 ---
 
 ## 🚀 Siguientes Pasos
-1. **Lógica de Ejecución de Órdenes**: Implementar en `mt5_bridge.py` los manejadores de eventos para procesar peticiones de compra/venta enviadas por el frontend y traducirlas a transacciones nativas de MT5 (`mt5.order_send`).
-2. **Módulo Risk Guard**: Configurar el cortacircuitos en Python para proteger de forma absoluta las futuras evaluaciones de fondeo.
-3. **Optimización de Gráficos e Indicadores**: Finalizar el binding de cálculos de indicadores técnicos en cliente (EMA, RSI, MACD) utilizando los flujos en vivo de MT5.
+1. **Módulo Risk Guard**: Configurar el cortacircuitos en Python para proteger de forma absoluta las futuras evaluaciones de fondeo.
+2. **Optimización de Gráficos e Indicadores**: Finalizar el binding de cálculos de indicadores técnicos en cliente (EMA, RSI, MACD) utilizando los flujos en vivo de MT5.
+3. **UI de Historial Extendida**: Permitir la consulta interactiva y recarga dinámica de hasta 10,000 velas para otros timeframes.

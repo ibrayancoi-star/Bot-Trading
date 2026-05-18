@@ -2,7 +2,6 @@ import type { Candle, Ticker24h, SymbolInfo } from "@/lib/types/market";
 import { useChartStore } from "../store/chart-store";
 import { useTradingStore } from "../store/trading-store";
 
-const CANDLE_DURATION_SECONDS = 60; // 1-minute candles
 const TICK_INTERVAL_MS = 1500; // emit a tick every 1.5 s
 
 function getSymbolParams(symbol: string) {
@@ -85,19 +84,42 @@ function buildCandle(time: number, open: number, symbol: string): Candle {
   return { time, open: roundPrice(open, isJPY), high, low, close, volume, isFinal: true };
 }
 
+function getTimeframeSeconds(tf: string): number {
+  switch (tf) {
+    case "1m": return 60;
+    case "3m": return 180;
+    case "5m": return 300;
+    case "15m": return 900;
+    case "30m": return 1800;
+    case "1h": return 3600;
+    case "2h": return 7200;
+    case "4h": return 14400;
+    case "6h": return 21600;
+    case "8h": return 28800;
+    case "12h": return 43200;
+    case "1d": return 86400;
+    case "3d": return 259200;
+    case "1w": return 604800;
+    case "1M": return 2592000;
+    default: return 60;
+  }
+}
+
 export function generateHistoricalData(count: number): Candle[] {
   const candles: Candle[] = [];
   const now = Math.floor(Date.now() / 1000);
-  // Align to the last completed minute boundary
-  const latestClose = now - (now % CANDLE_DURATION_SECONDS);
-  const startTime = latestClose - count * CANDLE_DURATION_SECONDS;
+  const tf = typeof window !== "undefined" ? useChartStore.getState().timeframe : "1m";
+  const duration = getTimeframeSeconds(tf);
+  // Align to the last completed boundary for the active timeframe
+  const latestClose = now - (now % duration);
+  const startTime = latestClose - count * duration;
 
   const symbol = typeof window !== "undefined" ? useChartStore.getState().symbol : "EURUSD";
   const { isJPY, basePrice } = getSymbolParams(symbol);
 
   let price = basePrice;
   for (let i = 0; i < count; i++) {
-    const time = startTime + i * CANDLE_DURATION_SECONDS;
+    const time = startTime + i * duration;
     const c = buildCandle(time, price, symbol);
     candles.push(c);
     price = c.close;
@@ -118,8 +140,11 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let liveCandle: Candle | null = null;
 let lastClose = 1.08500;
 
+
 function candleStartTime(nowSeconds: number): number {
-  return nowSeconds - (nowSeconds % CANDLE_DURATION_SECONDS);
+  const tf = typeof window !== "undefined" ? useChartStore.getState().timeframe : "1m";
+  const duration = getTimeframeSeconds(tf);
+  return nowSeconds - (nowSeconds % duration);
 }
 
 function startTickEngine() {
@@ -191,8 +216,73 @@ let localSocket: WebSocket | null = null;
 let isBridgeConnecting = false;
 let isBridgeLive = false;
 
-// Callbacks para despachar ticks al suscriptor activo
+// Callbacks para despachar ticks y el historial al suscriptor activo
 let activeOnCandleCallback: ((c: Candle) => void) | null = null;
+let activeOnHistoryCallback: ((history: Candle[]) => void) | null = null;
+
+export function requestHistoryFromBridge(symbol: string, timeframe: string) {
+  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+    const msg = {
+      action: "request_history",
+      symbol: "EURUSD", // Enfocado en EURUSD
+      timeframe,
+    };
+    localSocket.send(JSON.stringify(msg));
+    console.log(`📤 [MT5 Bridge] Solicitando historial para ${msg.symbol} (${msg.timeframe})`);
+  } else {
+    console.warn("⚠️ [MT5 Bridge] WebSocket no listo para solicitar historial.");
+  }
+}
+
+export function sendTradeOrder(symbol: string, type: "buy" | "sell", volume: number, tp: number = 0, sl: number = 0) {
+  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+    const msg = {
+      action: type,
+      symbol,
+      volume,
+      tp,
+      sl
+    };
+    localSocket.send(JSON.stringify(msg));
+    console.log(`📤 [MT5 Bridge] Enviando orden de ${type.toUpperCase()} para ${symbol} (${volume} lotes)`);
+  } else {
+    console.warn("⚠️ [MT5 Bridge] WebSocket no listo para enviar orden.");
+  }
+}
+
+export function modifyPosition(ticket: number, tp: number, sl: number) {
+  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+    const msg = {
+      action: "modify_position",
+      ticket,
+      tp,
+      sl
+    };
+    localSocket.send(JSON.stringify(msg));
+    console.log(`📤 [MT5 Bridge] Modificando posición ${ticket} (TP: ${tp}, SL: ${sl})`);
+  } else {
+    console.warn("⚠️ [MT5 Bridge] WebSocket no listo para modificar orden.");
+  }
+}
+
+// Suscribir el WebSocket a Zustand de manera global (se ejecuta una sola vez)
+if (typeof window !== "undefined") {
+  let lastTimeframe = useChartStore.getState().timeframe;
+  useChartStore.subscribe((state) => {
+    if (state.timeframe !== lastTimeframe) {
+      const prev = lastTimeframe;
+      lastTimeframe = state.timeframe;
+      if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+        console.log(`📡 [Zustand Sync] Cambio de Timeframe detectado en Zustand: ${prev} -> ${state.timeframe}. Solicitando historial a MT5...`);
+        localSocket.send(JSON.stringify({ 
+          action: "request_history", 
+          symbol: "EURUSD", 
+          timeframe: state.timeframe 
+        }));
+      }
+    }
+  });
+}
 
 function connectLocalMT5Bridge() {
   if (localSocket || isBridgeConnecting) return;
@@ -215,6 +305,15 @@ function connectLocalMT5Bridge() {
         lastSync: Date.now(),
       },
     });
+
+    // Petición de historial inicial en la conexión (Cold Start)
+    const currentState = useChartStore.getState();
+    console.log(`📡 [MT5 Bridge] Petición inicial de historial (Cold Start) para: ${currentState.timeframe}`);
+    socket.send(JSON.stringify({ 
+      action: "request_history", 
+      symbol: "EURUSD", 
+      timeframe: currentState.timeframe 
+    }));
   };
 
   socket.onmessage = (event) => {
@@ -222,8 +321,19 @@ function connectLocalMT5Bridge() {
       const data = JSON.parse(event.data);
 
       if (data.type === "account") {
+        // Obtener el tipo de cuenta autodetectado por el puente de Python (real, fondeo, demo)
+        const detectedType: "real" | "fondeo" | "demo" = data.account_type || "real";
+
+        // Solo cambiamos automáticamente de pestaña en el frontend si es la primera vez
+        // que nos conectamos o si el usuario cambia físicamente de cuenta en MetaTrader 5.
+        const currentStore = useTradingStore.getState();
+        const isNewAccount = !currentStore.account.login || 
+                             currentStore.account.login !== data.login || 
+                             currentStore.account.server !== data.server;
+
         // Sincronizar datos financieros de la cuenta en el store global
         useTradingStore.setState({
+          ...(isNewAccount ? { accountType: detectedType } : {}),
           account: {
             balance: data.balance,
             equity: data.equity,
@@ -231,6 +341,8 @@ function connectLocalMT5Bridge() {
             maxDrawdownLimit: data.balance * 0.10, // 10% Drawdown
             profitTarget: data.balance * 0.08, // 8% Target
             status: data.status === "failed" ? "failed" : "active",
+            server: data.server,
+            login: data.login
           },
           connection: {
             status: "connected",
@@ -238,6 +350,40 @@ function connectLocalMT5Bridge() {
             error: undefined
           }
         });
+      } else if (data.type === "positions") {
+        const positions = data.data.map((p: any) => ({
+          id: p.ticket.toString(),
+          ticket: p.ticket,
+          symbol: p.symbol,
+          type: p.type.toUpperCase(),
+          lotSize: p.volume,
+          entryPrice: p.open_price,
+          currentPrice: p.open_price + (p.profit > 0 ? 0.001 : -0.001), // Esto se actualiza visualmente
+          pnl: p.profit,
+          sl: p.sl,
+          tp: p.tp,
+          time: p.time,
+        }));
+        
+        // Sincronizar posiciones en el store
+        useTradingStore.setState({ positions });
+        
+      } else if (data.type === "history") {
+        const { symbol, timeframe, data: candles } = data;
+        console.log(`📥 [MT5 Bridge] Recibido historial de ${candles.length} velas para ${symbol} (${timeframe})`);
+        
+        if (candles.length > 0) {
+          const lastCandle = candles[candles.length - 1];
+          lastClose = lastCandle.close;
+          liveCandle = {
+            ...lastCandle,
+            isFinal: false // La marcamos como no finalizada para recibir actualizaciones de ticks en ella
+          };
+        }
+        
+        if (activeOnHistoryCallback) {
+          activeOnHistoryCallback(candles);
+        }
       } else if (data.type === "tick") {
         const { symbol, bid, ask } = data;
         const currentSymbol = useChartStore.getState().symbol;
@@ -291,7 +437,7 @@ function connectLocalMT5Bridge() {
   };
 
   socket.onerror = (error) => {
-    console.error("🚨 [MT5 Bridge] Error en WebSocket:", error);
+    console.error("🚨 [MT5 Bridge] Error de conexión en WebSocket. Asegúrate de que `mt5_bridge.py` esté ejecutándose en ws://127.0.0.1:8000", error);
   };
 
   socket.onclose = () => {
@@ -320,9 +466,15 @@ function connectLocalMT5Bridge() {
  *
  * Returns an unsubscribe function — call it on component unmount.
  */
-export function subscribeMockFeed(onCandle: (c: Candle) => void): () => void {
-  // Guardamos el callback activo para despachar los ticks reales de MT5
+export function subscribeMockFeed(
+  onCandle: (c: Candle) => void,
+  onHistory?: (history: Candle[]) => void
+): () => void {
+  // Guardamos los callbacks activos para despachar ticks e historial
   activeOnCandleCallback = onCandle;
+  if (onHistory) {
+    activeOnHistoryCallback = onHistory;
+  }
 
   // Intentamos conectar automáticamente al puente de Python (MT5)
   if (typeof window !== "undefined") {
@@ -348,6 +500,10 @@ export function subscribeMockFeed(onCandle: (c: Candle) => void): () => void {
       stopTickEngine();
       liveCandle = null;
       activeOnCandleCallback = null;
+      // NOTA: No anulamos activeOnHistoryCallback aquí.
+      // El WebSocket es un singleton global que vive fuera del ciclo de React.
+      // Si lo anulamos, las respuestas de historial se pierden durante
+      // la transición de cleanup/re-subscribe del useEffect.
     }
   };
 }

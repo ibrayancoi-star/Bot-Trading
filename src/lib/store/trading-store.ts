@@ -13,13 +13,17 @@ export interface PropAccount {
 }
 
 export interface TradePosition {
-  id: string;
+  id: string; // Ticket string
+  ticket?: number;
   symbol: string;
   type: "BUY" | "SELL";
   lotSize: number;
   entryPrice: number;
   currentPrice: number;
   pnl: number;
+  sl?: number;
+  tp?: number;
+  time?: number;
 }
 
 export interface RiskMetrics {
@@ -30,6 +34,7 @@ export interface RiskMetrics {
 }
 
 interface TradingState {
+  accountType: "real" | "fondeo" | "demo";
   account: PropAccount;
   config: TTPChallenge;
   positions: TradePosition[];
@@ -39,6 +44,7 @@ interface TradingState {
   isBotActive: boolean;
 
   // Actions
+  setAccountType: (type: "real" | "fondeo" | "demo") => void;
   updateEquity: (newEquity: number) => void;
   addPosition: (position: TradePosition) => void;
   closePosition: (id: string, result: TradeResult) => void;
@@ -49,6 +55,7 @@ interface TradingState {
 }
 
 export const useTradingStore = create<TradingState>()((set, get) => ({
+  accountType: "fondeo",
   account: {
     balance: 5000,
     equity: 5000,
@@ -79,6 +86,8 @@ export const useTradingStore = create<TradingState>()((set, get) => ({
     status: "disconnected",
   },
   isBotActive: false,
+
+  setAccountType: (type) => set({ accountType: type }),
 
   updateEquity: (newEquity) => {
     set((state) => ({

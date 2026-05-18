@@ -23,6 +23,7 @@ import {
 import { formatPrice, formatVolume } from "@/lib/format";
 import { IndicatorPill } from "./IndicatorPill";
 import { MeasureOverlay } from "./MeasureOverlay";
+import { useTradingStore } from "@/lib/store/trading-store";
 
 interface MeasurePoint {
   time: number;
@@ -526,6 +527,87 @@ export function PriceChart({ symbol, timeframe }: Props) {
     }
   }, [priceLines, symbol]);
 
+  // Positions price lines
+  const positions = useTradingStore((s) => s.positions);
+  const positionLinesMapRef = useRef<Map<string, IPriceLine>>(new Map());
+
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+    const map = positionLinesMapRef.current;
+    
+    // Create new maps to track what should be active
+    const activeLineIds = new Set<string>();
+
+    positions.filter(p => p.symbol === symbol).forEach((pos) => {
+      // Entry Line
+      const entryId = `pos_entry_${pos.id}`;
+      activeLineIds.add(entryId);
+      if (!map.has(entryId)) {
+        const pl = series.createPriceLine({
+          price: pos.entryPrice,
+          color: pos.type === "BUY" ? TV_COLORS.blue : TV_COLORS.red,
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: `${pos.type} ${pos.lotSize}`,
+        });
+        map.set(entryId, pl);
+      } else {
+         // Update title if needed
+         map.get(entryId)?.applyOptions({ price: pos.entryPrice, title: `${pos.type} ${pos.lotSize} (${pos.pnl > 0 ? '+':''}${pos.pnl.toFixed(2)})` });
+      }
+
+      // SL Line
+      if (pos.sl && pos.sl > 0) {
+        const slId = `pos_sl_${pos.id}`;
+        activeLineIds.add(slId);
+        if (!map.has(slId)) {
+          const pl = series.createPriceLine({
+            price: pos.sl,
+            color: TV_COLORS.red,
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: `SL`,
+          });
+          map.set(slId, pl);
+        } else {
+          map.get(slId)?.applyOptions({ price: pos.sl });
+        }
+      }
+
+      // TP Line
+      if (pos.tp && pos.tp > 0) {
+        const tpId = `pos_tp_${pos.id}`;
+        activeLineIds.add(tpId);
+        if (!map.has(tpId)) {
+          const pl = series.createPriceLine({
+            price: pos.tp,
+            color: TV_COLORS.green,
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: `TP`,
+          });
+          map.set(tpId, pl);
+        } else {
+          map.get(tpId)?.applyOptions({ price: pos.tp });
+        }
+      }
+    });
+
+    // Cleanup old lines
+    for (const [id, apiLine] of map.entries()) {
+      if (!activeLineIds.has(id)) {
+        try {
+          series.removePriceLine(apiLine);
+        } catch {}
+        map.delete(id);
+      }
+    }
+  }, [positions, symbol]);
+
   // Cursor style when drawing tools are active + reset measure on tool change
   useEffect(() => {
     if (containerRef.current) {
@@ -627,7 +709,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
   useEffect(() => {
     let unsub: (() => void) | null = null;
 
-    // ── 1. Load historical candles ──────────────────────────────────────────
+    // ── 1. Load historical candles (Mock as fallback) ───────────────────────
     const klines = generateHistoricalData(500);
     candlesRef.current = klines;
 
@@ -666,42 +748,83 @@ export function PriceChart({ symbol, timeframe }: Props) {
       });
     }
 
-    // ── 2. Subscribe to simulated real-time ticks ───────────────────────────
-    unsub = subscribeMockFeed((k) => {
-      if (!candleSeriesRef.current) return;
-      const arr = candlesRef.current;
-      const lastCandle = arr[arr.length - 1];
-      if (lastCandle && lastCandle.time === k.time) {
-        arr[arr.length - 1] = k;
-      } else if (!lastCandle || k.time > lastCandle.time) {
-        arr.push(k);
-        if (arr.length > 2000) arr.shift();
-      } else {
-        return;
-      }
-      candleSeriesRef.current.update({
-        time: k.time as UTCTimestamp,
-        open: k.open,
-        high: k.high,
-        low: k.low,
-        close: k.close,
-      });
-      if (volumeSeriesRef.current) {
-        volumeSeriesRef.current.update({
+    // ── 2. Subscribe to real-time ticks & MT5 history updates ───────────────
+    unsub = subscribeMockFeed(
+      (k) => {
+        // Callback para actualizaciones de ticks individuales
+        if (!candleSeriesRef.current) return;
+        const arr = candlesRef.current;
+        const lastCandle = arr[arr.length - 1];
+        if (lastCandle && lastCandle.time === k.time) {
+          arr[arr.length - 1] = k;
+        } else if (!lastCandle || k.time > lastCandle.time) {
+          arr.push(k);
+          if (arr.length > 2000) arr.shift();
+        } else {
+          return;
+        }
+        candleSeriesRef.current.update({
           time: k.time as UTCTimestamp,
-          value: k.volume,
-          color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
+          open: k.open,
+          high: k.high,
+          low: k.low,
+          close: k.close,
+        });
+        if (volumeSeriesRef.current) {
+          volumeSeriesRef.current.update({
+            time: k.time as UTCTimestamp,
+            value: k.volume,
+            color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
+          });
+        }
+        updateEMAs();
+        updateRSI();
+        updateMACD();
+        const prev = arr[arr.length - 2] ?? lastCandle;
+        setLastPrice({
+          value: k.close,
+          pct: prev && prev.close !== 0 ? ((k.close - prev.close) / prev.close) * 100 : 0,
+        });
+      },
+      (historyData) => {
+        // Callback al recibir el historial real de MT5 vía WebSocket
+        if (historyData.length === 0) return;
+        
+        candlesRef.current = historyData;
+        
+        if (candleSeriesRef.current) {
+          candleSeriesRef.current.setData(
+            historyData.map((k) => ({
+              time: k.time as UTCTimestamp,
+              open: k.open,
+              high: k.high,
+              low: k.low,
+              close: k.close,
+            })),
+          );
+        }
+        if (volumeSeriesRef.current) {
+          volumeSeriesRef.current.setData(
+            historyData.map((k) => ({
+              time: k.time as UTCTimestamp,
+              value: k.volume,
+              color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
+            })),
+          );
+        }
+        updateEMAs();
+        updateRSI();
+        updateMACD();
+        chartRef.current?.timeScale().fitContent();
+        
+        const last = historyData[historyData.length - 1];
+        const prev = historyData[historyData.length - 2] ?? last;
+        setLastPrice({
+          value: last.close,
+          pct: prev.close === 0 ? 0 : ((last.close - prev.close) / prev.close) * 100,
         });
       }
-      updateEMAs();
-      updateRSI();
-      updateMACD();
-      const prev = arr[arr.length - 2] ?? lastCandle;
-      setLastPrice({
-        value: k.close,
-        pct: prev && prev.close !== 0 ? ((k.close - prev.close) / prev.close) * 100 : 0,
-      });
-    });
+    );
 
     return () => {
       if (unsub) unsub();
