@@ -265,6 +265,19 @@ export function modifyPosition(ticket: number, tp: number, sl: number) {
   }
 }
 
+export function closePositionOnBridge(ticket: number) {
+  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+    const msg = {
+      action: "close_position",
+      ticket,
+    };
+    localSocket.send(JSON.stringify(msg));
+    console.log(`📤 [MT5 Bridge] Solicitando cierre de posición ${ticket}`);
+  } else {
+    console.warn("⚠️ [MT5 Bridge] WebSocket no listo para cerrar posición.");
+  }
+}
+
 // Suscribir el WebSocket a Zustand de manera global (se ejecuta una sola vez)
 if (typeof window !== "undefined") {
   let lastTimeframe = useChartStore.getState().timeframe;
@@ -321,19 +334,30 @@ function connectLocalMT5Bridge() {
       const data = JSON.parse(event.data);
 
       if (data.type === "account") {
-        // Obtener el tipo de cuenta autodetectado por el puente de Python (real, fondeo, demo)
-        const detectedType: "real" | "fondeo" | "demo" = data.account_type || "real";
+        const currentStore = useTradingStore.getState();
+        
+        // Check if we have a manually assigned type for this account
+        const accountKey = `${data.server}_${data.login}`;
+        const knownAccount = currentStore.knownAccounts[accountKey];
+        
+        // Use manually set type if exists, otherwise fallback to bridge's autodetection
+        let targetType: "real" | "fondeo" | "demo" = knownAccount?.type || (data.account_type || "real");
 
         // Solo cambiamos automáticamente de pestaña en el frontend si es la primera vez
         // que nos conectamos o si el usuario cambia físicamente de cuenta en MetaTrader 5.
-        const currentStore = useTradingStore.getState();
         const isNewAccount = !currentStore.account.login || 
                              currentStore.account.login !== data.login || 
                              currentStore.account.server !== data.server;
 
+        // Register the account if it's entirely new to our persistence
+        if (!knownAccount && data.login && data.server) {
+          currentStore.registerKnownAccount(data.login, data.server, targetType);
+        }
+
         // Sincronizar datos financieros de la cuenta en el store global
         useTradingStore.setState({
-          ...(isNewAccount ? { accountType: detectedType } : {}),
+          accountType: targetType,
+          algoTradingEnabled: data.algo_trading === true,
           account: {
             balance: data.balance,
             equity: data.equity,
@@ -350,6 +374,14 @@ function connectLocalMT5Bridge() {
             error: undefined
           }
         });
+      } else if (data.type === "trade_result") {
+        // Feedback de resultado de operación desde el puente MT5
+        const store = useTradingStore.getState();
+        if (data.success) {
+          store.addNotification("success", data.message || "Operación ejecutada.");
+        } else {
+          store.addNotification("error", data.error || "Error desconocido.");
+        }
       } else if (data.type === "positions") {
         const positions = data.data.map((p: any) => ({
           id: p.ticket.toString(),
@@ -358,7 +390,7 @@ function connectLocalMT5Bridge() {
           type: p.type.toUpperCase(),
           lotSize: p.volume,
           entryPrice: p.open_price,
-          currentPrice: p.open_price + (p.profit > 0 ? 0.001 : -0.001), // Esto se actualiza visualmente
+          currentPrice: p.current_price || p.open_price,
           pnl: p.profit,
           sl: p.sl,
           tp: p.tp,
@@ -385,12 +417,13 @@ function connectLocalMT5Bridge() {
           activeOnHistoryCallback(candles);
         }
       } else if (data.type === "tick") {
-        const { symbol, bid, ask } = data;
+        const { symbol, bid, ask, time } = data;
         const currentSymbol = useChartStore.getState().symbol;
 
         // Si el tick recibido coincide con el activo en pantalla
         if (symbol === currentSymbol && activeOnCandleCallback) {
-          const nowSec = Math.floor(Date.now() / 1000);
+          // Usar el tiempo del servidor MT5 enviado en el tick si existe, si no, fallback a local
+          const nowSec = time ? time : Math.floor(Date.now() / 1000);
           const candleTime = candleStartTime(nowSec);
           const price = round5((bid + ask) / 2); // Precio medio (Mid)
 

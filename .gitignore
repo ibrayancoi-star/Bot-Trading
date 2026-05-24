@@ -49,3 +49,12 @@ id_rsa*
 credentials.json
 .aws/
 .ssh/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ChromaDB local storage
+chroma_db/

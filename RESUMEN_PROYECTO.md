@@ -1,11 +1,12 @@
 # Documentación y Resumen del Proyecto: Dashboard de Trading Híbrido
 
 ## 💡 Idea Central del Desarrollo
-El proyecto consiste en la creación de una plataforma de trading avanzada (tipo TradingView) orientada a ofrecer un entorno visual premium, analítica de mercado y ejecución de órdenes en un solo lugar.
+El proyecto consiste en la creación de una plataforma de trading avanzada (tipo TradingView) orientada a ofrecer un entorno visual premium, analítica de mercado y ejecución de órdenes en un solo lugar, con un sistema de inteligencia artificial y contexto.
 
 ### Arquitectura Híbrida:
 1. **Frontend (Panel de Monitoreo Visual - Next.js)**: Conserva la interfaz premium y el estado reactivo ya construidos. Se conecta a un servidor WebSocket local administrado por Python para pintar gráficos y métricas de la cuenta de forma reactiva y ultrarrápida.
 2. **Backend/Motor de Ejecución (Python + MT5)**: Un script en segundo plano (`mt5_bridge.py`) que corre localmente, se conecta de manera nativa a la terminal de escritorio de MetaTrader 5 (MT5), extrae ticks en tiempo real, procesa la lógica de las estrategias, ejecuta el control de riesgo y envía las órdenes al broker.
+3. **Módulo de Contexto e Inteligencia (ChromaDB + NLP)**: Un motor de contexto basado en la base de datos vectorial ChromaDB y Transformers que procesa un reglamento en lenguaje natural, filtra operativas por contexto semántico y se retroalimenta automáticamente de las operaciones fallidas.
 
 Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTrader, eliminando las restricciones de KYC, optimizando presupuesto y facilitando el uso de cualquier cuenta demo o real tradicional abierta en la aplicación de escritorio de MT5.
 
@@ -27,12 +28,26 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 - **Múltiples Modos de Llenado (Filling Modes)**: Soporte para múltiples Filling Modes (IOC, FOK, RETURN) de forma secuencial y transparente para adaptarse a cualquier tipo de broker (Demo/Real/Fondeo).
 - **Detección Inteligente de Cuentas**: Detección automática del tipo de cuenta (`fondeo`, `real` o `demo`) mediante la lectura del servidor y palabras clave (`ftmo`, `funding`, `prop`, etc.).
 
-### 3. Adaptación del Frontend y Zustand Store
+### 3. Módulo de Contexto y Base de Datos Vectorial (`context_engine.py`)
+- **Base Vectorial (ChromaDB)**: Integración de ChromaDB en local (`./chroma_db`) para almacenar el reglamento de trading ("crt_rules_curated.md") y la experiencia de trading en formato semántico.
+- **Procesamiento de NLP**: Uso del modelo `sentence-transformers/all-MiniLM-L6-v2` para vectorización 100% offline.
+- **Capas de Reglas**: 
+  - **Capa 1 (Hard Rules)**: Filtros deterministas en `mt5_bridge.py` por zona horaria ("Atlantic/Canary"), Killzones (London, NY), y spread máximo (ratio Spread/ATR).
+  - **Capa 2 (Semántica)**: Validación pre-trade evaluando la similitud del setup propuesto frente al reglamento aceptado.
+  - **Capa 3 (Exclusión y Feedback Loop)**: Sistema de autoaprendizaje que monitorea el historial de MetaTrader (cada 5 segs). Cuando un trade resulta en `LOSS`, se inyecta su contexto semántico como una regla de *exclusión* para bloquear futuras operativas similares.
+
+### 4. Adaptación del Frontend y Zustand Store
 - **Feed Integrado (`mock-feed.ts`)**: Adaptado para conectarse directamente a `ws://127.0.0.1:8000`. Procesa y agrega los ticks en tiempo real en velas de 1 minuto para inyectarlas directamente al gráfico (`PriceChart.tsx`).
   - **Sincronización Inteligente de Cuenta**: La pestaña del switch se autoselecciona la primera vez que se carga la página o si físicamente cambias de cuenta en MT5 (según login/server), permitiendo al usuario cambiar y permanecer manualmente en la pestaña elegida sin molestas reversiones.
 - **Persistencia Reactiva (`trading-store.ts`)**: Mapeo completo de las métricas recibidas de MT5 para actualizar el balance, equidad, margen libre y evaluar en vivo los cortacircuitos de Drawdown. Añadida la opción de cuenta `demo` en la lógica de estado.
 - **Widget Superior e Inputs**: Selector completo de tres opciones (Real / Fondeo / Demo) y campos configurables para Lotaje, Take Profit (TP) y Stop Loss (SL).
 - **Líneas de Precios en Gráfico**: Representación visual de posiciones activas incluyendo nivel de entrada con PnL dinámico flotante, líneas punteadas de TP y SL directo en el gráfico.
+
+### 5. Módulo Risk Guard (Cortacircuitos de Pérdida)
+- **Monitoreo de Drawdown (10Hz)**: Bucle en segundo plano integrado directamente en la difusión de ticks que calcula en tiempo real la equidad contra el balance inicial del día (`daily_starting_balance`) y total.
+- **Configuración de Umbrales**: Lectura de parámetros de protección (`max_daily_loss_pct` y `max_total_loss_pct`) desde la sección `risk_management` en `config_crt.json`.
+- **Cierre de Pánico Integrado**: Cierre instantáneo y asíncrono de todas las posiciones abiertas en MT5 si se exceden los límites para evitar deslizamiento de precios (slippage).
+- **Bloqueo Operativo Absoluto**: Bloqueo del envío de órdenes desde el puente y desactivación de operaciones hasta el reinicio diario del balance, además del envío de alertas websocket de emergencia (`risk_guard_alert`).
 
 ---
 
@@ -45,10 +60,12 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 | **Detección de Cuenta** | ✅ COMPLETO | Detección automática basada en nombre de servidor broker y trade mode de MT5 (Demo/Real/Fondeo). |
 | **Ejecución y Modificación** | ✅ COMPLETO | Soporte nativo para órdenes BUY, SELL y cancelación con fallback inteligente de Filling Modes (IOC -> FOK -> RETURN). |
 | **Persistencia del Switch** | ✅ COMPLETO | Control absoluto del usuario sobre el switch de cuenta sin reinicios cíclicos automáticos. |
+| **Módulo de Contexto** | ✅ COMPLETO | Motor ChromaDB integrado offline. Reglas curadas importadas (Capa 1 y Capa 2/3). |
+| **Feedback Loop (IA)** | ✅ COMPLETO | Tarea asíncrona en `mt5_bridge.py` que registra resultados de trades y genera exclusiones automáticas de setups fallidos. |
+| **Módulo Risk Guard** | ✅ COMPLETO | Cortacircuitos de Drawdown en tiempo real (10Hz) con cierre de pánico de posiciones y bloqueo de operativas. |
 
 ---
 
 ## 🚀 Siguientes Pasos
-1. **Módulo Risk Guard**: Configurar el cortacircuitos en Python para proteger de forma absoluta las futuras evaluaciones de fondeo.
-2. **Optimización de Gráficos e Indicadores**: Finalizar el binding de cálculos de indicadores técnicos en cliente (EMA, RSI, MACD) utilizando los flujos en vivo de MT5.
-3. **UI de Historial Extendida**: Permitir la consulta interactiva y recarga dinámica de hasta 10,000 velas para otros timeframes.
+1. **Optimización de Gráficos e Indicadores**: Finalizar el binding de cálculos de indicadores técnicos en cliente (EMA, RSI, MACD) utilizando los flujos en vivo de MT5.
+2. **UI de Historial Extendida**: Permitir la consulta interactiva y recarga dinámica de hasta 10,000 velas para otros timeframes.

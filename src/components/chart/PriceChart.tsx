@@ -12,7 +12,7 @@ import {
   type IPriceLine,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { generateHistoricalData, subscribeMockFeed } from "@/lib/data/mock-feed";
+import { generateHistoricalData, subscribeMockFeed, modifyPosition, closePositionOnBridge } from "@/lib/data/mock-feed";
 import { ema, rsi, macd } from "@/lib/indicators";
 import type { Candle, Timeframe } from "@/lib/types/market";
 import {
@@ -527,9 +527,155 @@ export function PriceChart({ symbol, timeframe }: Props) {
     }
   }, [priceLines, symbol]);
 
-  // Positions price lines
+  // Positions price lines — interactive drag for SL/TP
   const positions = useTradingStore((s) => s.positions);
   const positionLinesMapRef = useRef<Map<string, IPriceLine>>(new Map());
+  const dragStateRef = useRef<{
+    active: boolean;
+    lineType: "sl" | "tp";
+    posId: string;
+    ticket: number;
+    startY: number;
+    startPrice: number;
+    otherValue: number; // The TP when dragging SL, and vice versa
+  } | null>(null);
+
+  // Setup drag handlers once
+  useEffect(() => {
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    if (!container || !chart || !series) return;
+
+    const handleMouseDown = (e: MouseEvent) => {
+      if (!candleSeriesRef.current) return;
+      const rect = container.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const clickPrice = candleSeriesRef.current.coordinateToPrice(y);
+      if (clickPrice === null || !isFinite(clickPrice)) return;
+
+      // Check if click is near any SL/TP line
+      const currentPositions = useTradingStore.getState().positions;
+      const currentSymbol = useChartStore.getState().symbol;
+      const threshold = Math.abs(clickPrice) * 0.0003; // 0.03% tolerance
+
+      for (const pos of currentPositions) {
+        if (pos.symbol !== currentSymbol) continue;
+        const ticket = pos.ticket || parseInt(pos.id);
+
+        if (pos.sl && pos.sl > 0 && Math.abs(clickPrice - pos.sl) < threshold) {
+          dragStateRef.current = {
+            active: true,
+            lineType: "sl",
+            posId: pos.id,
+            ticket,
+            startY: y,
+            startPrice: pos.sl,
+            otherValue: pos.tp || 0,
+          };
+          container.style.cursor = "ns-resize";
+          e.preventDefault();
+          return;
+        }
+        if (pos.tp && pos.tp > 0 && Math.abs(clickPrice - pos.tp) < threshold) {
+          dragStateRef.current = {
+            active: true,
+            lineType: "tp",
+            posId: pos.id,
+            ticket,
+            startY: y,
+            startPrice: pos.tp,
+            otherValue: pos.sl || 0,
+          };
+          container.style.cursor = "ns-resize";
+          e.preventDefault();
+          return;
+        }
+      }
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag || !drag.active || !candleSeriesRef.current) return;
+
+      const rect = container.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const newPrice = candleSeriesRef.current.coordinateToPrice(y);
+      if (newPrice === null || !isFinite(newPrice)) return;
+
+      // Update the visual line position in real-time
+      const map = positionLinesMapRef.current;
+      const lineId = drag.lineType === "sl" ? `pos_sl_${drag.posId}` : `pos_tp_${drag.posId}`;
+      const line = map.get(lineId);
+      if (line) {
+        line.applyOptions({ price: parseFloat(newPrice.toFixed(5)) });
+      }
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag || !drag.active) return;
+
+      container.style.cursor = "";
+      
+      if (candleSeriesRef.current) {
+        const rect = container.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        const finalPrice = candleSeriesRef.current.coordinateToPrice(y);
+        if (finalPrice !== null && isFinite(finalPrice)) {
+          const rounded = parseFloat(finalPrice.toFixed(5));
+          if (drag.lineType === "sl") {
+            modifyPosition(drag.ticket, drag.otherValue, rounded);
+          } else {
+            modifyPosition(drag.ticket, rounded, drag.otherValue);
+          }
+        }
+      }
+
+      dragStateRef.current = null;
+    };
+
+    // Hover cursor change near SL/TP lines
+    const handleHoverCheck = (e: MouseEvent) => {
+      if (dragStateRef.current?.active) return;
+      if (!candleSeriesRef.current) return;
+
+      const rect = container.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const hoverPrice = candleSeriesRef.current.coordinateToPrice(y);
+      if (hoverPrice === null || !isFinite(hoverPrice)) return;
+
+      const currentPositions = useTradingStore.getState().positions;
+      const currentSymbol = useChartStore.getState().symbol;
+      const threshold = Math.abs(hoverPrice) * 0.0003;
+
+      let nearLine = false;
+      for (const pos of currentPositions) {
+        if (pos.symbol !== currentSymbol) continue;
+        if ((pos.sl && pos.sl > 0 && Math.abs(hoverPrice - pos.sl) < threshold) ||
+            (pos.tp && pos.tp > 0 && Math.abs(hoverPrice - pos.tp) < threshold)) {
+          nearLine = true;
+          break;
+        }
+      }
+
+      if (toolRef.current === "cursor") {
+        container.style.cursor = nearLine ? "ns-resize" : "";
+      }
+    };
+
+    container.addEventListener("mousedown", handleMouseDown);
+    container.addEventListener("mousemove", handleMouseMove);
+    container.addEventListener("mousemove", handleHoverCheck);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      container.removeEventListener("mousedown", handleMouseDown);
+      container.removeEventListener("mousemove", handleMouseMove);
+      container.removeEventListener("mousemove", handleHoverCheck);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     const series = candleSeriesRef.current;
@@ -554,7 +700,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
         });
         map.set(entryId, pl);
       } else {
-         // Update title if needed
+         // Update title with live PnL
          map.get(entryId)?.applyOptions({ price: pos.entryPrice, title: `${pos.type} ${pos.lotSize} (${pos.pnl > 0 ? '+':''}${pos.pnl.toFixed(2)})` });
       }
 
@@ -573,7 +719,10 @@ export function PriceChart({ symbol, timeframe }: Props) {
           });
           map.set(slId, pl);
         } else {
-          map.get(slId)?.applyOptions({ price: pos.sl });
+          // Only update if not currently being dragged
+          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== pos.id || dragStateRef.current?.lineType !== "sl") {
+            map.get(slId)?.applyOptions({ price: pos.sl });
+          }
         }
       }
 
@@ -592,7 +741,9 @@ export function PriceChart({ symbol, timeframe }: Props) {
           });
           map.set(tpId, pl);
         } else {
-          map.get(tpId)?.applyOptions({ price: pos.tp });
+          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== pos.id || dragStateRef.current?.lineType !== "tp") {
+            map.get(tpId)?.applyOptions({ price: pos.tp });
+          }
         }
       }
     });
