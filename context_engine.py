@@ -207,10 +207,10 @@ def add_trade_experience(trade_data: dict):
         "metadata": metadata
     }
 
-def get_historical_trades_text() -> list:
+def get_historical_trades_text(limit=20) -> list:
     """
     Consulta la colección de ChromaDB buscando registros de operaciones guardadas,
-    filtrando por {"source": "execution_history"}. Retorna los últimos 20 registros.
+    filtrando por {"source": "execution_history"}. Retorna las últimas experiencias (por defecto 20).
     """
     try:
         # Consultamos todos los que tengan source: execution_history
@@ -224,6 +224,9 @@ def get_historical_trades_text() -> list:
                 doc = res["documents"][i] if res["documents"] else ""
                 trades.append({
                     "id": res["ids"][i],
+                    "texto": doc,
+                    "tipo_meta": meta.get("type", "execution_history") if meta else "execution_history",
+                    "timestamp": meta.get("timestamp", 0.0) if meta else 0.0,
                     "document": doc,
                     "metadata": meta
                 })
@@ -242,14 +245,17 @@ def get_historical_trades_text() -> list:
                             doc = r["documents"][i] if r["documents"] else ""
                             all_res.append({
                                 "id": r["ids"][i],
+                                "texto": doc,
+                                "tipo_meta": meta.get("type", "execution_history") if meta else "execution_history",
+                                "timestamp": meta.get("timestamp", 0.0) if meta else 0.0,
                                 "document": doc,
                                 "metadata": meta
                             })
             trades = all_res
 
         # Ordenar por timestamp descendente (más recientes primero)
-        trades.sort(key=lambda x: x["metadata"].get("timestamp", 0.0), reverse=True)
-        return trades[:20]
+        trades.sort(key=lambda x: x.get("timestamp", 0.0), reverse=True)
+        return trades[:limit]
     except Exception as e:
         print(f"[ContextEngine] Error al obtener historial de trades: {e}")
         return []
