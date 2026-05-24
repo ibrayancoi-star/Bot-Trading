@@ -417,7 +417,7 @@ function connectLocalMT5Bridge() {
           activeOnHistoryCallback(candles);
         }
       } else if (data.type === "tick") {
-        const { symbol, bid, ask, time } = data;
+        const { symbol, bid, ask, time, indicators } = data;
         const currentSymbol = useChartStore.getState().symbol;
 
         // Si el tick recibido coincide con el activo en pantalla
@@ -449,6 +449,7 @@ function connectLocalMT5Bridge() {
               close: price,
               volume: 1,
               isFinal: false,
+              indicators,
             };
           } else {
             liveCandle = {
@@ -458,11 +459,53 @@ function connectLocalMT5Bridge() {
               low: Math.min(liveCandle.low, price),
               volume: liveCandle.volume + 1,
               isFinal: false,
+              indicators,
             };
           }
 
           activeOnCandleCallback({ ...liveCandle });
         }
+      } else if (data.type === "history_init") {
+        // Carga masiva inicial del historial de operaciones desde ChromaDB
+        const trades = (data.trades || []).map((t: any, i: number) => ({
+          id: t.id || `hist_${Date.now()}_${i}`,
+          document: t.document || "",
+          metadata: {
+            type: t.metadata?.type || "execution_history",
+            title: t.metadata?.title || "Trade",
+            symbol: t.metadata?.symbol || "UNKNOWN",
+            trade_type: t.metadata?.trade_type || "BUY",
+            outcome: t.metadata?.outcome || "UNKNOWN",
+            pips_result: t.metadata?.pips_result || 0,
+            spread: t.metadata?.spread || 0,
+            setup_initial: t.metadata?.setup_initial || "",
+            timestamp: t.metadata?.timestamp || Date.now(),
+            source: t.metadata?.source || "execution_history",
+          },
+        }));
+        console.log(`📜 [MT5 Bridge] Historial inicial recibido: ${trades.length} operaciones.`);
+        useTradingStore.getState().setHistoricalTrades(trades);
+      } else if (data.type === "history_update") {
+        // Nueva operación individual registrada por el Feedback Loop
+        const t = data.trade || {};
+        const trade = {
+          id: t.id || `hist_${Date.now()}`,
+          document: t.document || "",
+          metadata: {
+            type: t.metadata?.type || "execution_history",
+            title: t.metadata?.title || "Trade",
+            symbol: t.metadata?.symbol || "UNKNOWN",
+            trade_type: t.metadata?.trade_type || "BUY",
+            outcome: t.metadata?.outcome || "UNKNOWN",
+            pips_result: t.metadata?.pips_result || 0,
+            spread: t.metadata?.spread || 0,
+            setup_initial: t.metadata?.setup_initial || "",
+            timestamp: t.metadata?.timestamp || Date.now(),
+            source: t.metadata?.source || "execution_history",
+          },
+        };
+        console.log(`📝 [MT5 Bridge] Nueva operación registrada: ${trade.metadata.symbol} ${trade.metadata.outcome}`);
+        useTradingStore.getState().addHistoricalTrade(trade);
       }
     } catch (err) {
       console.error("❌ [MT5 Bridge] Error al parsear mensaje:", err);

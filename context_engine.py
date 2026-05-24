@@ -181,20 +181,75 @@ def add_trade_experience(trade_data: dict):
 
     # Generar ID única para la experiencia del trade
     exp_id = f"trade_experience_{outcome.lower()}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    
+    metadata = {
+        "type": meta_type,
+        "title": f"Trade Experience {outcome} - {symbol} - {setup_initial}",
+        "symbol": symbol,
+        "trade_type": trade_type,
+        "outcome": outcome,
+        "pips_result": float(pips_result),
+        "spread": float(spread),
+        "setup_initial": setup_initial,
+        "timestamp": float(time.time()),
+        "source": "execution_history"
+    }
 
     collection.add(
         ids=[exp_id],
         documents=[semantic_str],
-        metadatas=[{
-            "type": meta_type,
-            "title": f"Trade Experience {outcome} - {symbol} - {setup_initial}",
-            "symbol": symbol,
-            "trade_type": trade_type,
-            "outcome": outcome,
-            "pips_result": float(pips_result),
-            "spread": float(spread),
-            "setup_initial": setup_initial,
-            "timestamp": float(time.time())
-        }]
+        metadatas=[metadata]
     )
     print(f"[ContextEngine] Experiencia de trade {outcome} agregada con ID {exp_id} bajo la etiqueta '{meta_type}'.")
+    return {
+        "id": exp_id,
+        "document": semantic_str,
+        "metadata": metadata
+    }
+
+def get_historical_trades_text() -> list:
+    """
+    Consulta la colección de ChromaDB buscando registros de operaciones guardadas,
+    filtrando por {"source": "execution_history"}. Retorna los últimos 20 registros.
+    """
+    try:
+        # Consultamos todos los que tengan source: execution_history
+        res = collection.get(
+            where={"source": "execution_history"}
+        )
+        trades = []
+        if res and "metadatas" in res and res["metadatas"]:
+            for i in range(len(res["ids"])):
+                meta = res["metadatas"][i]
+                doc = res["documents"][i] if res["documents"] else ""
+                trades.append({
+                    "id": res["ids"][i],
+                    "document": doc,
+                    "metadata": meta
+                })
+        
+        # Fallback para registros de trades antiguos que no tengan el tag "source"
+        if not trades:
+            res_excl = collection.get(where={"type": "capa_3_exclusion"})
+            res_sem = collection.get(where={"type": "capa_2_semantica"})
+            
+            all_res = []
+            for r in [res_excl, res_sem]:
+                if r and "metadatas" in r and r["metadatas"]:
+                    for i in range(len(r["ids"])):
+                        meta = r["metadatas"][i]
+                        if meta and "Trade Experience" in meta.get("title", ""):
+                            doc = r["documents"][i] if r["documents"] else ""
+                            all_res.append({
+                                "id": r["ids"][i],
+                                "document": doc,
+                                "metadata": meta
+                            })
+            trades = all_res
+
+        # Ordenar por timestamp descendente (más recientes primero)
+        trades.sort(key=lambda x: x["metadata"].get("timestamp", 0.0), reverse=True)
+        return trades[:20]
+    except Exception as e:
+        print(f"[ContextEngine] Error al obtener historial de trades: {e}")
+        return []

@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { TradeResult, TTPChallenge, BrokerConnection } from "../types/trading";
+import { HistoricalTrade } from "../types/market";
 
 export interface PropAccount {
   balance: number;
@@ -62,6 +63,7 @@ interface TradingState {
   algoTradingEnabled: boolean;
   notifications: TradeNotification[];
   knownAccounts: Record<string, KnownAccount>;
+  historicalTrades: HistoricalTrade[];
 
   // Actions
   setAccountType: (type: "real" | "fondeo" | "demo") => void;
@@ -75,6 +77,8 @@ interface TradingState {
   addNotification: (type: TradeNotification["type"], message: string) => void;
   dismissNotification: (id: string) => void;
   registerKnownAccount: (login: number, server: string, type: "real" | "fondeo" | "demo") => void;
+  setHistoricalTrades: (trades: HistoricalTrade[]) => void;
+  addHistoricalTrade: (trade: HistoricalTrade) => void;
 }
 
 export const useTradingStore = create<TradingState>()(
@@ -114,8 +118,17 @@ export const useTradingStore = create<TradingState>()(
       algoTradingEnabled: false,
       notifications: [],
       knownAccounts: {},
+      historicalTrades: [],
 
       setAccountType: (type) => set({ accountType: type }),
+      setHistoricalTrades: (trades) => set({ historicalTrades: trades }),
+      addHistoricalTrade: (trade) =>
+        set((state) => ({
+          historicalTrades: [
+            trade,
+            ...state.historicalTrades.filter((t) => t.id !== trade.id),
+          ].slice(0, 50), // Guardar hasta 50 últimos trades
+        })),
 
       updateEquity: (newEquity) => {
         set((state) => ({

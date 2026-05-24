@@ -9,7 +9,7 @@ import os
 import datetime
 import time
 from zoneinfo import ZoneInfo
-from context_engine import initialize_vector_db, validate_market_context, add_trade_experience
+from context_engine import initialize_vector_db, validate_market_context, add_trade_experience, get_historical_trades_text
 
 # Configuración de Logs
 logging.basicConfig(
@@ -44,6 +44,9 @@ TIMEFRAME_MAP = {
 CONNECTED_CLIENTS = set()
 MT5_INITIALIZED = False
 
+# Active Timeframe (sincronizada desde la UI del frontend)
+active_timeframe = "1m"
+
 # Risk Guard State
 RISK_GUARD_TRIGGERED = False
 daily_starting_balance = None
@@ -58,6 +61,114 @@ last_ticks = {
     "EURUSD": {"bid": 0.0, "ask": 0.0},
     "GBPUSD": {"bid": 0.0, "ask": 0.0}
 }
+
+# Rangos de referencia anclados para EURUSD y GBPUSD
+anchor_ranges = {
+    "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"},
+    "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"}
+}
+
+# Registro de la última acción del escáner para evitar spamming en los logs y WS
+last_scanner_action_time = {
+    "EURUSD": {"DETECTED": 0, "DISMISSED": 0},
+    "GBPUSD": {"DETECTED": 0, "DISMISSED": 0}
+}
+
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return 0.0
+    k = 2 / (period + 1)
+    ema_val = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema_val = price * k + ema_val * (1 - k)
+    return ema_val
+
+def calculate_rsi(prices, period=14):
+    if len(prices) <= period:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        diff = prices[i] - prices[i-1]
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(-diff)
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(prices)):
+        diff = prices[i] - prices[i-1]
+        g = diff if diff > 0 else 0.0
+        l = -diff if diff < 0 else 0.0
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    if len(prices) < slow + signal:
+        return 0.0, 0.0, 0.0
+    k_fast = 2 / (fast + 1)
+    k_slow = 2 / (slow + 1)
+    
+    ema_fast = sum(prices[:fast]) / fast
+    ema_fast_list = [ema_fast]
+    for p in prices[fast:]:
+        ema_fast = p * k_fast + ema_fast * (1 - k_fast)
+        ema_fast_list.append(ema_fast)
+        
+    ema_slow = sum(prices[:slow]) / slow
+    ema_slow_list = [ema_slow]
+    for p in prices[slow:]:
+        ema_slow = p * k_slow + ema_slow * (1 - k_slow)
+        ema_slow_list.append(ema_slow)
+        
+    macd_line = []
+    for i in range(len(ema_slow_list)):
+        f = ema_fast_list[slow - fast + i]
+        s = ema_slow_list[i]
+        macd_line.append(f - s)
+        
+    if len(macd_line) < signal:
+        return 0.0, 0.0, 0.0
+    k_sig = 2 / (signal + 1)
+    sig_val = sum(macd_line[:signal]) / signal
+    for val in macd_line[signal:]:
+        sig_val = val * k_sig + sig_val * (1 - k_sig)
+        
+    macd_val = macd_line[-1]
+    hist_val = macd_val - sig_val
+    return macd_val, sig_val, hist_val
+
+def get_indicators(broker_sym, mt5_tf):
+    # Solicitamos suficientes velas para que los indicadores (EMA 21, MACD 26, RSI 14) se calculen con precisión
+    rates = mt5.copy_rates_from_pos(broker_sym, mt5_tf, 0, 150)
+    if rates is None or len(rates) < 50:
+        return {
+            "ema_9": 0.0,
+            "ema_21": 0.0,
+            "rsi": 50.0,
+            "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0}
+        }
+    prices = [float(r['close']) for r in rates]
+    ema_9 = calculate_ema(prices, 9)
+    ema_21 = calculate_ema(prices, 21)
+    rsi_val = calculate_rsi(prices, 14)
+    macd_val, sig_val, hist_val = calculate_macd(prices, 12, 26, 9)
+    return {
+        "ema_9": ema_9,
+        "ema_21": ema_21,
+        "rsi": rsi_val,
+        "macd": {
+            "macd": macd_val,
+            "signal": sig_val,
+            "histogram": hist_val
+        }
+    }
 
 # Cache de resolución de símbolos del bróker
 _symbol_cache = {}
@@ -196,6 +307,317 @@ def validate_hard_rules(symbol: str, current_spread_points: float, range_size_pi
     except Exception as e:
         logger.error(f"Error en validación de hard rules: {e}")
         return False, f"Error interno en validación: {str(e)}"
+
+def get_current_atr(broker_sym, timeframe, period=14):
+    """
+    Calcula el Average True Range (ATR) en pips o puntos en base a los últimos 'period' candles.
+    """
+    try:
+        rates = mt5.copy_rates_from_pos(broker_sym, timeframe, 0, period + 1)
+        if rates is None or len(rates) < period + 1:
+            return 12.0  # safe default in pips
+        
+        tr_sum = 0.0
+        for i in range(1, len(rates)):
+            h = float(rates[i]['high'])
+            l = float(rates[i]['low'])
+            pc = float(rates[i-1]['close'])
+            tr = max(h - l, abs(h - pc), abs(l - pc))
+            tr_sum += tr
+            
+        atr_value = tr_sum / period
+        
+        # Convertir a pips
+        symbol_upper = broker_sym.upper()
+        pip_value = 0.01 if "JPY" in symbol_upper else 0.0001
+        return atr_value / pip_value
+    except Exception as e:
+        logger.error(f"Error al calcular ATR para {broker_sym}: {e}")
+        return 12.0
+
+def update_reference_ranges():
+    """
+    Monitorea y calcula los rangos de referencia (HTF Anchor Candles) basados en la hora de Canarias.
+    Busca la vela H4 que corresponde al último cierre de vela de anclaje (06:00, 10:00 o 14:00 Canary time).
+    """
+    global MT5_INITIALIZED, anchor_ranges
+    if not MT5_INITIALIZED:
+        return
+
+    try:
+        tz = ZoneInfo("Atlantic/Canary")
+        now_canary = datetime.datetime.now(tz)
+        current_hour = now_canary.hour
+
+        # Determinar el inicio teórico de la vela de anclaje (Canary time)
+        if current_hour >= 14 or current_hour < 6:
+            target_start_hour = 10  # Vela de 10:00 a 14:00 Canary (cierra a las 14:00)
+            anchor_label = "14:00 Anchor (10:00-14:00)"
+        elif current_hour >= 10:
+            target_start_hour = 6   # Vela de 06:00 a 10:00 Canary (cierra a las 10:00)
+            anchor_label = "10:00 Anchor (06:00-10:00)"
+        else:
+            target_start_hour = 2   # Vela de 02:00 a 06:00 Canary (cierra a las 06:00)
+            anchor_label = "06:00 Anchor (02:00-06:00)"
+
+        for symbol in ["EURUSD", "GBPUSD"]:
+            broker_sym = get_broker_symbol(symbol)
+            rates = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_H4, 0, 10)
+            if rates is None or len(rates) == 0:
+                continue
+
+            # Calcular la zona horaria del broker en base al tick actual
+            tick = mt5.symbol_info_tick(broker_sym)
+            if tick:
+                server_dt = datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+                local_dt = datetime.datetime.now(datetime.timezone.utc)
+                offset_hours = round((server_dt - local_dt).total_seconds() / 3600.0)
+            else:
+                offset_hours = 2
+
+            selected_rate = None
+            for rate in reversed(rates):
+                broker_start_dt = datetime.datetime.fromtimestamp(rate['time'])
+                canary_start_dt = broker_start_dt - datetime.timedelta(hours=offset_hours)
+                
+                if canary_start_dt.hour == target_start_hour:
+                    # Si es overnight (h < 6), buscar la vela de ayer a las 10:00
+                    if current_hour < 6:
+                        yesterday_date = (now_canary - datetime.timedelta(days=1)).date()
+                        if canary_start_dt.date() == yesterday_date:
+                            selected_rate = rate
+                            break
+                    else:
+                        if canary_start_dt.date() == now_canary.date():
+                            selected_rate = rate
+                            break
+
+            # Si no se encontró coincidencia perfecta, usar la vela cerrada anterior (index 1)
+            if selected_rate is None and len(rates) > 1:
+                selected_rate = rates[1]
+
+            if selected_rate is not None:
+                high = float(selected_rate['high'])
+                low = float(selected_rate['low'])
+                eq = low + 0.5 * (high - low)
+                
+                # Actualizar y notificar solo si cambió
+                if anchor_ranges[symbol]["high"] != high or anchor_ranges[symbol]["low"] != low:
+                    anchor_ranges[symbol].update({
+                        "high": high,
+                        "low": low,
+                        "eq": eq,
+                        "anchor_time": anchor_label
+                    })
+                    logger.info(f"Escáner: Rango de anclaje actualizado para {symbol}: High={high:.5f}, Low={low:.5f}, EQ={eq:.5f} ({anchor_label})")
+                    
+                    asyncio.create_task(broadcast({
+                        "type": "anchor_update",
+                        "symbol": symbol,
+                        "high": high,
+                        "low": low,
+                        "eq": eq,
+                        "anchor_time": anchor_label
+                    }))
+    except Exception as e:
+        logger.error(f"Error en update_reference_ranges: {e}")
+
+async def strategy_scanner_task():
+    """
+    Bucle en segundo plano que monitorea en tiempo real barridos de liquidez (Sweeps)
+    y ejecuta operaciones autónomas con el motor de reglas (Capa 1 y Capa 2/3).
+    """
+    global MT5_INITIALIZED, RISK_GUARD_TRIGGERED, anchor_ranges, last_scanner_action_time
+    logger.info("Escáner de Estrategia: Iniciando bucle autónomo...")
+    
+    # Cooldown para evitar abrir múltiples posiciones consecutivas en la misma vela
+    last_trade_time = {
+        "EURUSD": 0.0,
+        "GBPUSD": 0.0
+    }
+
+    # Inicializar rangos
+    await asyncio.sleep(5)
+    update_reference_ranges()
+
+    while True:
+        if MT5_INITIALIZED and not RISK_GUARD_TRIGGERED:
+            try:
+                # Actualizar rangos periódicamente
+                update_reference_ranges()
+                
+                for symbol in ["EURUSD", "GBPUSD"]:
+                    broker_sym = get_broker_symbol(symbol)
+                    
+                    # Evitar duplicar si ya hay una posición abierta para el par
+                    positions = mt5.positions_get(symbol=broker_sym)
+                    if positions is not None and len(positions) > 0:
+                        continue
+                        
+                    # Respetar cooldown de 3 minutos tras ejecutar una orden autónoma
+                    now_time = time.time()
+                    if now_time - last_trade_time[symbol] < 180:
+                        continue
+
+                    # Obtener precios y datos del símbolo
+                    tick = mt5.symbol_info_tick(broker_sym)
+                    sym_info = mt5.symbol_info(broker_sym)
+                    if tick is None or sym_info is None or sym_info.point <= 0:
+                        continue
+
+                    bid = tick.bid
+                    ask = tick.ask
+                    
+                    crt_high = anchor_ranges[symbol]["high"]
+                    crt_low = anchor_ranges[symbol]["low"]
+                    
+                    if crt_high == 0.0 or crt_low == 0.0:
+                        continue # No hay velas de anclaje inicializadas aún
+
+                    direction = None
+                    price = 0.0
+                    
+                    # Detección de Barrido (Sweep)
+                    if bid > crt_high:
+                        direction = "SELL"
+                        price = bid
+                    elif ask < crt_low:
+                        direction = "BUY"
+                        price = ask
+
+                    if direction is not None:
+                        # Evitar spamming de la señal DETECTED (máximo una vez cada 60 segundos por dirección)
+                        last_det_time = last_scanner_action_time[symbol]["DETECTED"]
+                        if now_time - last_det_time > 60:
+                            last_scanner_action_time[symbol]["DETECTED"] = now_time
+                            await broadcast({
+                                "type": "scanner_signal",
+                                "symbol": symbol,
+                                "action": "DETECTED",
+                                "direction": direction,
+                                "price": price,
+                                "message": f"⚠️ Señal de barrido detectada en {symbol} ({direction} @ {price:.5f}). Evaluando filtros..."
+                            })
+                            logger.info(f"Escáner: Señal de barrido detectada en {symbol} ({direction} @ {price:.5f}). Evaluando filtros...")
+
+                        # Parámetros cuantitativos
+                        current_spread_points = float((tick.ask - tick.bid) / sym_info.point)
+                        ltf_atr = get_current_atr(broker_sym, mt5.TIMEFRAME_M1, 14)
+                        
+                        symbol_upper = symbol.upper()
+                        pip_value = 0.01 if "JPY" in symbol_upper else 0.0001
+                        range_size_pips = (crt_high - crt_low) / pip_value
+
+                        # --- CAPA 1: VALIDACIÓN DE HARD RULES ---
+                        hard_ok, hard_msg = validate_hard_rules(broker_sym, current_spread_points, range_size_pips, ltf_atr)
+                        if not hard_ok:
+                            # Evitar spamming de desestimación
+                            last_dism_time = last_scanner_action_time[symbol]["DISMISSED"]
+                            if now_time - last_dism_time > 60:
+                                last_scanner_action_time[symbol]["DISMISSED"] = now_time
+                                await broadcast({
+                                    "type": "scanner_signal",
+                                    "symbol": symbol,
+                                    "action": "DISMISSED",
+                                    "direction": direction,
+                                    "reason": f"Capa 1: {hard_msg}",
+                                    "message": f"❌ Señal desestimada en {symbol}: {hard_msg}"
+                                })
+                                logger.info(f"Escáner: Señal desestimada en {symbol}: {hard_msg}")
+                            continue
+
+                        # --- CAPA 2/3: VALIDACIÓN DE CONTEXTO DE MERCADO ---
+                        setup_name = f"Sweep {'High' if direction == 'SELL' else 'Low'} Reversal ({direction})"
+                        market_snapshot = (
+                            f"Symbol: {symbol}, Action: {direction}, Price: {price:.5f}, CRT_HIGH: {crt_high:.5f}, "
+                            f"CRT_LOW: {crt_low:.5f}, ATR: {ltf_atr:.1f}, Spread: {current_spread_points/10.0:.1f} pips."
+                        )
+                        
+                        loop = asyncio.get_running_loop()
+                        validation_res = await loop.run_in_executor(
+                            None, validate_market_context, setup_name, market_snapshot
+                        )
+                        
+                        if not validation_res.get("approved", True):
+                            reason = validation_res.get("reason", "Bloqueado por exclusión vectorial.")
+                            # Evitar spamming de desestimación por contexto
+                            last_dism_time = last_scanner_action_time[symbol]["DISMISSED"]
+                            if now_time - last_dism_time > 60:
+                                last_scanner_action_time[symbol]["DISMISSED"] = now_time
+                                await broadcast({
+                                    "type": "scanner_signal",
+                                    "symbol": symbol,
+                                    "action": "DISMISSED",
+                                    "direction": direction,
+                                    "reason": f"Contexto: {reason}",
+                                    "message": f"❌ Señal desestimada en {symbol}: {reason}"
+                                })
+                                logger.info(f"Escáner: Señal desestimada en {symbol}: {reason}")
+                            continue
+
+                        # --- AMBAS CAPAS APROBADAS: DISPARO AUTÓNOMO ---
+                        # Calcular SL: Extremo del barrido más holgura (1.5 * ATR de 1m)
+                        # Calcular TP: Punto medio de equilibrio (EQ) de la vela de anclaje
+                        eq_tp = anchor_ranges[symbol]["eq"]
+                        
+                        if direction == "SELL":
+                            sl_price = crt_high + 1.5 * ltf_atr * pip_value
+                            order_type = mt5.ORDER_TYPE_SELL
+                        else:
+                            sl_price = crt_low - 1.5 * ltf_atr * pip_value
+                            order_type = mt5.ORDER_TYPE_BUY
+
+                        volume = 0.1  # Lotaje controlado para cuentas de fondeo
+                        
+                        request = {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "symbol": broker_sym,
+                            "volume": volume,
+                            "type": order_type,
+                            "price": price,
+                            "sl": sl_price,
+                            "tp": eq_tp,
+                            "deviation": 20,
+                            "magic": 234000,
+                            "comment": f"Auto {direction} Reversal",
+                            "type_time": mt5.ORDER_TIME_GTC,
+                        }
+
+                        # Enviar orden usando fallbacks de filling mode
+                        result = try_order_send(request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            last_trade_time[symbol] = now_time
+                            msg = f"🚀 ¡Operación ejecutada automáticamente! {direction} {symbol} @ {price:.5f}. SL: {sl_price:.5f}, TP: {eq_tp:.5f}. Ticket: {result.order}"
+                            logger.info(f"Escáner: {msg}")
+                            await broadcast({
+                                "type": "scanner_signal",
+                                "symbol": symbol,
+                                "action": "EXECUTED",
+                                "direction": direction,
+                                "ticket": result.order,
+                                "price": price,
+                                "sl": sl_price,
+                                "tp": eq_tp,
+                                "message": msg
+                            })
+                        else:
+                            comment = result.comment if result else "Error desconocido"
+                            msg = f"❌ Falló ejecución automática en {symbol}: {comment}"
+                            logger.error(f"Escáner: {msg}")
+                            await broadcast({
+                                "type": "scanner_signal",
+                                "symbol": symbol,
+                                "action": "FAILED",
+                                "direction": direction,
+                                "reason": comment,
+                                "message": msg
+                            })
+
+            except Exception as e:
+                logger.error(f"Error en strategy_scanner_task: {e}", exc_info=True)
+                
+        await asyncio.sleep(1.0)  # Escaneo a frecuencia de 1Hz para óptimo rendimiento asíncrono
 
 async def check_mt5_connection():
     """Bucle que intenta inicializar y mantener la conexión con MT5, sin forzar su apertura."""
@@ -461,12 +883,17 @@ async def tick_broadcaster():
                         last_ticks[symbol]["bid"] = bid
                         last_ticks[symbol]["ask"] = ask
                         
+                        # Calcular indicadores en base a la temporalidad activa
+                        mt5_tf = TIMEFRAME_MAP.get(active_timeframe, mt5.TIMEFRAME_M1)
+                        indicators_data = get_indicators(broker_sym, mt5_tf)
+                        
                         await broadcast({
                             "type": "tick",
                             "symbol": symbol,
                             "bid": bid,
                             "ask": ask,
-                            "time": tick.time
+                            "time": tick.time,
+                            "indicators": indicators_data
                         })
                 else:
                     logger.debug(f"No se pudo obtener el tick para {symbol}")
@@ -512,6 +939,29 @@ async def handler(websocket):
             "algo_trading": False
         }))
 
+    # Enviar historial de operaciones guardadas (UI de Historial Extendida)
+    try:
+        loop = asyncio.get_running_loop()
+        historical_trades = await loop.run_in_executor(None, get_historical_trades_text)
+        await websocket.send(json.dumps({
+            "type": "history_init",
+            "trades": historical_trades
+        }))
+        
+        # Enviar rangos de anclaje iniciales para pintar líneas en el gráfico
+        for symbol in ["EURUSD", "GBPUSD"]:
+            if anchor_ranges[symbol]["high"] > 0:
+                await websocket.send(json.dumps({
+                    "type": "anchor_update",
+                    "symbol": symbol,
+                    "high": anchor_ranges[symbol]["high"],
+                    "low": anchor_ranges[symbol]["low"],
+                    "eq": anchor_ranges[symbol]["eq"],
+                    "anchor_time": anchor_ranges[symbol]["anchor_time"]
+                }))
+    except Exception as e:
+        logger.error(f"Error al enviar history_init al cliente: {e}")
+
     try:
         async for message in websocket:
             # Procesar posibles comandos enviados por el cliente web
@@ -526,6 +976,8 @@ async def handler(websocket):
                 elif action == "request_history":
                     symbol = data.get("symbol", "EURUSD")
                     tf_str = data.get("timeframe", "1m")
+                    global active_timeframe
+                    active_timeframe = tf_str
                     
                     # Forzar EURUSD por ahora según requerimiento
                     if symbol != "EURUSD":
@@ -989,11 +1441,17 @@ async def feedback_loop_task():
                             logger.info(f"Feedback Loop: Registrando trade en ChromaDB: Posición {position_id}, "
                                         f"Resultado: {outcome} ({pips_result:.1f} pips).")
                                         
-                            # Ejecutar la inserción en ChromaDB en un hilo ejecutor no bloqueante
+                            # Ejecutar la inserción en ChromaDB en un hilo ejecutor no bloqueante y esperar resultado
                             loop = asyncio.get_running_loop()
-                            loop.run_in_executor(None, add_trade_experience, trade_data)
+                            new_trade = await loop.run_in_executor(None, add_trade_experience, trade_data)
                             
                             processed_deals.add(deal_ticket)
+                            
+                            if new_trade:
+                                await broadcast({
+                                    "type": "history_update",
+                                    "trade": new_trade
+                                })
                             
             except Exception as e:
                 logger.error(f"Feedback Loop: Error en monitoreo de deals: {e}")
@@ -1034,6 +1492,7 @@ async def main():
     asyncio.create_task(account_broadcaster())
     asyncio.create_task(positions_broadcaster())
     asyncio.create_task(feedback_loop_task())
+    asyncio.create_task(strategy_scanner_task())
     
     logger.info("WS: Levantando servidor WebSocket local en ws://127.0.0.1:8000 ...")
     async with websockets.serve(handler, "127.0.0.1", 8000):

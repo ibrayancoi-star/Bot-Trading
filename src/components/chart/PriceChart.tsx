@@ -99,6 +99,19 @@ export function PriceChart({ symbol, timeframe }: Props) {
   const ema20Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const ema50Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const ema200Ref = useRef<ISeriesApi<"Line"> | null>(null);
+  const ema9Ref = useRef<ISeriesApi<"Line"> | null>(null);
+  const ema21Ref = useRef<ISeriesApi<"Line"> | null>(null);
+
+  const [liveIndicators, setLiveIndicators] = useState<{
+    ema_9?: number;
+    ema_21?: number;
+    rsi?: number;
+    macd?: {
+      macd: number;
+      signal: number;
+      histogram: number;
+    };
+  } | null>(null);
   const rsiRef = useRef<ISeriesApi<"Line"> | null>(null);
   const rsi30Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const rsi70Ref = useRef<ISeriesApi<"Line"> | null>(null);
@@ -217,6 +230,19 @@ export function PriceChart({ symbol, timeframe }: Props) {
       lastValueVisible: false,
     });
 
+    ema9Ref.current = chart.addSeries(LineSeries, {
+      color: "#38bdf8",
+      lineWidth: 1.5 as any,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    ema21Ref.current = chart.addSeries(LineSeries, {
+      color: "#f97316",
+      lineWidth: 1.5 as any,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
     chartRef.current = chart;
 
     // Click handler — add horizontal price line when hline tool is active
@@ -322,6 +348,8 @@ export function PriceChart({ symbol, timeframe }: Props) {
       ema20Ref.current = null;
       ema50Ref.current = null;
       ema200Ref.current = null;
+      ema9Ref.current = null;
+      ema21Ref.current = null;
       rsiRef.current = null;
       rsi30Ref.current = null;
       rsi70Ref.current = null;
@@ -928,6 +956,15 @@ export function PriceChart({ symbol, timeframe }: Props) {
             color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
           });
         }
+        if (k.indicators) {
+          if (ema9Ref.current && k.indicators.ema_9 !== undefined) {
+            ema9Ref.current.update({ time: k.time as UTCTimestamp, value: k.indicators.ema_9 });
+          }
+          if (ema21Ref.current && k.indicators.ema_21 !== undefined) {
+            ema21Ref.current.update({ time: k.time as UTCTimestamp, value: k.indicators.ema_21 });
+          }
+          setLiveIndicators(k.indicators);
+        }
         updateEMAs();
         updateRSI();
         updateMACD();
@@ -962,6 +999,22 @@ export function PriceChart({ symbol, timeframe }: Props) {
               color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
             })),
           );
+        }
+        if (ema9Ref.current) {
+          const ema9Data = historyData
+            .filter((c) => c.indicators?.ema_9 !== undefined)
+            .map((c) => ({ time: c.time as UTCTimestamp, value: c.indicators!.ema_9! }));
+          ema9Ref.current.setData(ema9Data);
+        }
+        if (ema21Ref.current) {
+          const ema21Data = historyData
+            .filter((c) => c.indicators?.ema_21 !== undefined)
+            .map((c) => ({ time: c.time as UTCTimestamp, value: c.indicators!.ema_21! }));
+          ema21Ref.current.setData(ema21Data);
+        }
+        const lastCandleWithInds = [...historyData].reverse().find(c => c.indicators !== undefined);
+        if (lastCandleWithInds?.indicators) {
+          setLiveIndicators(lastCandleWithInds.indicators);
         }
         updateEMAs();
         updateRSI();
@@ -1187,6 +1240,47 @@ export function PriceChart({ symbol, timeframe }: Props) {
             onSettings={() => setSettingsTarget("macd")}
             onRemove={() => removeIndicator("macd")}
           />
+        </div>
+      )}
+
+      {/* Panel de Estado de Osciladores (RSI y MACD) */}
+      {liveIndicators && (
+        <div className="absolute right-3 bottom-3 z-10 flex items-center gap-5 rounded-lg border border-tv-border bg-tv-panel/90 px-4 py-2 text-xs text-tv-text backdrop-blur-md shadow-lg pointer-events-auto border-l-4 border-l-tv-blue">
+          {/* RSI */}
+          {liveIndicators.rsi !== undefined && (
+            <div className="flex items-center gap-1.5 border-r border-tv-border/50 pr-4">
+              <span className="font-semibold text-tv-text-muted">RSI (14):</span>
+              <span className={`font-mono font-bold ${
+                liveIndicators.rsi > 70 
+                  ? "text-tv-red animate-pulse" 
+                  : liveIndicators.rsi < 30 
+                    ? "text-tv-green animate-pulse" 
+                    : "text-tv-text"
+              }`}>
+                {liveIndicators.rsi.toFixed(2)}
+              </span>
+              <span className="text-[10px] text-tv-text-muted ml-1">
+                {liveIndicators.rsi > 70 ? "(Sobrecompra)" : liveIndicators.rsi < 30 ? "(Sobreventa)" : ""}
+              </span>
+            </div>
+          )}
+          {/* MACD */}
+          {liveIndicators.macd !== undefined && (
+            <div className="flex items-center gap-3">
+              <span className="font-semibold text-tv-text-muted">MACD (12, 26, 9):</span>
+              <div className="flex items-center gap-2 font-mono">
+                <span className="text-tv-blue" title="MACD Line">
+                  Line: <strong className="font-bold">{liveIndicators.macd.macd.toFixed(5)}</strong>
+                </span>
+                <span className="text-tv-yellow" title="Signal Line">
+                  Sig: <strong className="font-bold">{liveIndicators.macd.signal.toFixed(5)}</strong>
+                </span>
+                <span className={liveIndicators.macd.histogram >= 0 ? "text-tv-green" : "text-tv-red"} title="Histogram">
+                  Hist: <strong className="font-bold">{liveIndicators.macd.histogram.toFixed(5)}</strong>
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

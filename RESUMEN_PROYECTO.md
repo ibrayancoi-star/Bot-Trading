@@ -49,6 +49,22 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 - **Cierre de Pánico Integrado**: Cierre instantáneo y asíncrono de todas las posiciones abiertas en MT5 si se exceden los límites para evitar deslizamiento de precios (slippage).
 - **Bloqueo Operativo Absoluto**: Bloqueo del envío de órdenes desde el puente y desactivación de operaciones hasta el reinicio diario del balance, además del envío de alertas websocket de emergencia (`risk_guard_alert`).
 
+### 6. Optimización de Gráficos e Indicadores
+- **Cálculo en Backend (10Hz)**: Implementado el cálculo en tiempo real de EMA 9, EMA 21, RSI 14 y MACD (12, 26, 9) en `mt5_bridge.py` en base a los precios bid/ask consultados de MT5.
+- **Transmisión de Indicadores**: Actualización del payload del WebSocket para incluir los valores numéricos calculados del backend en el evento `tick`.
+- **Renderizado de EMAs**: Inyección dinámica en Lightweight Charts de las líneas de EMA 9 (azul `#38bdf8`) y EMA 21 (rojo/naranja `#f97316`) con anchos de línea de 1.5.
+- **Sub-panel de Osciladores**: Creación de una barra flotante premium en el gráfico de la web UI para mostrar los valores en tiempo real del RSI (con alertas de color reactivo para sobrecompra/sobreventa) y de las líneas/histograma de MACD.
+
+### 7. UI de Historial Extendida (Experiencia de ChromaDB)
+- **Servicio Fullstack**: Canalización de las experiencias del Feedback Loop de ChromaDB en tiempo real hacia el frontend mediante los eventos `history_init` (carga inicial masiva de las últimas 20 operaciones) y `history_update` (actualizaciones reactivas tras cada cierre de posición).
+- **Componente HistoryPanel**: Panel interactivo premium con KPIs cuantitativos en vivo (Win Rate, Pips Netos, Relación W/L) y filas expandibles para revelar los diagnósticos y reflexiones semánticas almacenadas por el motor de IA.
+- **Navegación por Pestañas**: Reestructuración del panel inferior (`BottomPanel.tsx`) con tabs reactivas tipo TradingView que integran insignias de conteo dinámico sobre posiciones activas e historial.
+
+### 8. Escáner de Estrategia Automatizado (Strategy Scanner Loop)
+- **Monitoreo de Velas de Anclaje (HTF)**: Bucle persistente que calcula los rangos clave de referencia de MetaTrader 5 (CRT High, CRT Low y Equilibrium EQ) al cierre de las velas definidas en Canarias (06:00, 10:00, 14:00), alineadas matemáticamente con la sesión de Nueva York.
+- **Detección de Barridos (Sweeps) en Tiempo Real**: Escaneo continuo de precios a 1Hz. Cuando la cotización rompe los extremos en una Killzone activa, pre-activa la alerta de barrido de liquidez.
+- **Ejecución y Disparo Autónomo**: Si las reglas duras (Capa 1) y de contexto vectorial (Capa 2/3) se aprueban, realiza el envío automático de la orden (`order_send`) con Stop Loss adaptado y Take Profit objetivo en el Equilibrium (EQ), informando del estado de cada señal (DETECTED, DISMISSED, EXECUTED) al frontend por WebSocket.
+
 ---
 
 ## 🚀 Estado del Proyecto (Actualizado Mayo-2026)
@@ -63,9 +79,12 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 | **Módulo de Contexto** | ✅ COMPLETO | Motor ChromaDB integrado offline. Reglas curadas importadas (Capa 1 y Capa 2/3). |
 | **Feedback Loop (IA)** | ✅ COMPLETO | Tarea asíncrona en `mt5_bridge.py` que registra resultados de trades y genera exclusiones automáticas de setups fallidos. |
 | **Módulo Risk Guard** | ✅ COMPLETO | Cortacircuitos de Drawdown en tiempo real (10Hz) con cierre de pánico de posiciones y bloqueo de operativas. |
+| **Optimización de Indicadores** | ✅ COMPLETO | Renderizado dinámico de EMA 9/EMA 21 y barra de estado flotante para osciladores RSI y MACD. |
+| **UI de Historial Extendida** | ✅ COMPLETO | Panel inferior con pestañas, badges de conteo y renderizado de diagnósticos del Feedback Loop. |
+| **Escáner Autónomo** | ✅ COMPLETO | Detección de barridos H4, validaciones multicapa automáticas y ejecución directa en MT5 sin intervención humana. |
 
 ---
 
 ## 🚀 Siguientes Pasos
-1. **Optimización de Gráficos e Indicadores**: Finalizar el binding de cálculos de indicadores técnicos en cliente (EMA, RSI, MACD) utilizando los flujos en vivo de MT5.
-2. **UI de Historial Extendida**: Permitir la consulta interactiva y recarga dinámica de hasta 10,000 velas para otros timeframes.
+1. **Visualización de Alertas del Escáner en UI**: Incorporar una consola o log flotante en la interfaz web para pintar las notificaciones del escáner en tiempo real (`scanner_signal`).
+2. **Backtesting Semántico**: Desarrollar scripts de simulación históricos para calibrar la distancia vectorial idónea en ChromaDB.

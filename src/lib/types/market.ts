@@ -23,6 +23,16 @@ export interface Candle {
   close: number;
   volume: number;
   isFinal?: boolean;
+  indicators?: {
+    ema_9?: number;
+    ema_21?: number;
+    rsi?: number;
+    macd?: {
+      macd: number;
+      signal: number;
+      histogram: number;
+    };
+  };
 }
 
 export interface Ticker24h {
@@ -41,4 +51,21 @@ export interface SymbolInfo {
   baseAsset: string;
   quoteAsset: string;
   status: string;
+}
+
+export interface HistoricalTrade {
+  id: string;
+  document: string;
+  metadata: {
+    type: "capa_3_exclusion" | "capa_2_semantica" | string;
+    title: string;
+    symbol: string;
+    trade_type: "BUY" | "SELL" | string;
+    outcome: "PROFIT" | "LOSS" | string;
+    pips_result: number;
+    spread: number;
+    setup_initial: string;
+    timestamp: number;
+    source?: string;
+  };
 }
