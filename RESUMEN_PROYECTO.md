@@ -62,6 +62,7 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 
 ### 8. Escáner de Estrategia Automatizado (Strategy Scanner Loop)
 - **Monitoreo de Velas de Anclaje (HTF)**: Bucle persistente que calcula los rangos clave de referencia de MetaTrader 5 (CRT High, CRT Low y Equilibrium EQ) al cierre de las velas definidas en Canarias (06:00, 10:00, 14:00), alineadas matemáticamente con la sesión de Nueva York.
+- **Soporte Multi-Par Simultáneo**: El escáner evalúa oportunidades de manera concurrente, detectando y ejecutando posiciones en **EUR/USD** y **GBP/USD** al mismo tiempo.
 - **Detección de Barridos (Sweeps) en Tiempo Real**: Escaneo continuo de precios a 1Hz. Cuando la cotización rompe los extremos en una Killzone activa, pre-activa la alerta de barrido de liquidez.
 - **Ejecución y Disparo Autónomo**: Si las reglas duras (Capa 1) y de contexto vectorial (Capa 2/3) se aprueban, realiza el envío automático de la orden (`order_send`) con Stop Loss adaptado y Take Profit objetivo en el Equilibrium (EQ), informando del estado de cada señal (DETECTED, DISMISSED, EXECUTED) al frontend por WebSocket.
 
