@@ -152,7 +152,7 @@ function startTickEngine() {
 
   tickTimer = setInterval(() => {
     if (subscriptions.length === 0) return;
-    
+
     // Si la conexión real con MT5 está activa, no generamos ticks simulados
     if (isBridgeLive) return;
 
@@ -287,10 +287,24 @@ if (typeof window !== "undefined") {
       lastTimeframe = state.timeframe;
       if (localSocket && localSocket.readyState === WebSocket.OPEN) {
         console.log(`📡 [Zustand Sync] Cambio de Timeframe detectado en Zustand: ${prev} -> ${state.timeframe}. Solicitando historial a MT5...`);
-        localSocket.send(JSON.stringify({ 
-          action: "request_history", 
-          symbol: "EURUSD", 
-          timeframe: state.timeframe 
+        localSocket.send(JSON.stringify({
+          action: "request_history",
+          symbol: "EURUSD",
+          timeframe: state.timeframe
+        }));
+      }
+    }
+  });
+
+  let lastBotActive = useTradingStore.getState().isBotActive;
+  useTradingStore.subscribe((state) => {
+    if (state.isBotActive !== lastBotActive) {
+      lastBotActive = state.isBotActive;
+      if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+        console.log(`📡 [Zustand Sync] Cambio de estado de bot detectado: ${state.isBotActive}. Enviando a MT5...`);
+        localSocket.send(JSON.stringify({
+          action: "toggle_bot",
+          active: state.isBotActive
         }));
       }
     }
@@ -321,11 +335,16 @@ function connectLocalMT5Bridge() {
 
     // Petición de historial inicial en la conexión (Cold Start)
     const currentState = useChartStore.getState();
+    const currentBotActive = useTradingStore.getState().isBotActive;
     console.log(`📡 [MT5 Bridge] Petición inicial de historial (Cold Start) para: ${currentState.timeframe}`);
-    socket.send(JSON.stringify({ 
-      action: "request_history", 
-      symbol: "EURUSD", 
-      timeframe: currentState.timeframe 
+    socket.send(JSON.stringify({
+      action: "request_history",
+      symbol: "EURUSD",
+      timeframe: currentState.timeframe
+    }));
+    socket.send(JSON.stringify({
+      action: "toggle_bot",
+      active: currentBotActive
     }));
   };
 
@@ -333,21 +352,26 @@ function connectLocalMT5Bridge() {
     try {
       const data = JSON.parse(event.data);
 
-      if (data.type === "account") {
+      if (data.type === "bot_status") {
         const currentStore = useTradingStore.getState();
-        
+        if (currentStore.isBotActive !== data.active) {
+          useTradingStore.setState({ isBotActive: data.active });
+        }
+      } else if (data.type === "account") {
+        const currentStore = useTradingStore.getState();
+
         // Check if we have a manually assigned type for this account
         const accountKey = `${data.server}_${data.login}`;
         const knownAccount = currentStore.knownAccounts[accountKey];
-        
+
         // Use manually set type if exists, otherwise fallback to bridge's autodetection
         let targetType: "real" | "fondeo" | "demo" = knownAccount?.type || (data.account_type || "real");
 
         // Solo cambiamos automáticamente de pestaña en el frontend si es la primera vez
         // que nos conectamos o si el usuario cambia físicamente de cuenta en MetaTrader 5.
-        const isNewAccount = !currentStore.account.login || 
-                             currentStore.account.login !== data.login || 
-                             currentStore.account.server !== data.server;
+        const isNewAccount = !currentStore.account.login ||
+          currentStore.account.login !== data.login ||
+          currentStore.account.server !== data.server;
 
         // Register the account if it's entirely new to our persistence
         if (!knownAccount && data.login && data.server) {
@@ -396,14 +420,14 @@ function connectLocalMT5Bridge() {
           tp: p.tp,
           time: p.time,
         }));
-        
+
         // Sincronizar posiciones en el store
         useTradingStore.setState({ positions });
-        
+
       } else if (data.type === "history") {
         const { symbol, timeframe, data: candles } = data;
         console.log(`📥 [MT5 Bridge] Recibido historial de ${candles.length} velas para ${symbol} (${timeframe})`);
-        
+
         if (candles.length > 0) {
           const lastCandle = candles[candles.length - 1];
           lastClose = lastCandle.close;
@@ -412,7 +436,7 @@ function connectLocalMT5Bridge() {
             isFinal: false // La marcamos como no finalizada para recibir actualizaciones de ticks en ella
           };
         }
-        
+
         if (activeOnHistoryCallback) {
           activeOnHistoryCallback(candles);
         }
@@ -565,7 +589,7 @@ export function subscribeMockFeed(
 
   const sub: MockSubscription = { onCandle };
   subscriptions.push(sub);
-  
+
   // Siempre iniciamos el motor mock como contingencia/fallback
   // Pero el callback de WebSocket MT5 lo pisará en tiempo real si el puente está activo
   startTickEngine();

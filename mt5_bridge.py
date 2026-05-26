@@ -56,6 +56,9 @@ risk_config = {
     "max_total_loss_pct": 8.0
 }
 
+# Bot Active State (sincronizado con la interfaz web)
+BOT_ACTIVE = False
+
 # Últimos ticks conocidos para evitar envíos redundantes
 last_ticks = {
     "EURUSD": {"bid": 0.0, "ask": 0.0},
@@ -445,6 +448,10 @@ async def strategy_scanner_task():
             try:
                 # Actualizar rangos periódicamente
                 update_reference_ranges()
+                
+                if not BOT_ACTIVE:
+                    await asyncio.sleep(1.0)
+                    continue
                 
                 for symbol in ["EURUSD", "GBPUSD"]:
                     broker_sym = get_broker_symbol(symbol)
@@ -910,10 +917,16 @@ async def account_broadcaster():
 
 async def handler(websocket):
     """Manejador de conexiones WebSocket entrantes."""
+    global BOT_ACTIVE
     logger.info(f"WS: Nuevo cliente conectado desde {websocket.remote_address}")
     CONNECTED_CLIENTS.add(websocket)
     
     # Enviar estado inicial
+    await websocket.send(json.dumps({
+        "type": "bot_status",
+        "active": BOT_ACTIVE
+    }))
+    
     if MT5_INITIALIZED:
         acc_data = get_account_data()
         if acc_data:
@@ -1029,6 +1042,14 @@ async def handler(websocket):
                             "timeframe": tf_str,
                             "data": candle_list
                         })
+                
+                elif action == "toggle_bot":
+                    BOT_ACTIVE = data.get("active", False)
+                    logger.info(f"WS: Bot Active status updated to: {BOT_ACTIVE}")
+                    await broadcast({
+                        "type": "bot_status",
+                        "active": BOT_ACTIVE
+                    })
                 
                 elif action in ["buy", "sell"]:
                     symbol = data.get("symbol", "EURUSD")

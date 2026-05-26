@@ -73,6 +73,7 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 | :--- | :---: | :--- |
 | **Frontend UI** | ✅ COMPLETO | Switch de 3 cuentas, inputs interactivos de trading en panel lateral, visualización de métricas y balance/equity reactivo. |
 | **Integración de Gráfico** | ✅ COMPLETO | Conexión a Lightweight Charts asíncrona, velas en vivo y líneas visuales de órdenes activas (Precio, SL, TP). |
+| **Soporte Multi-Símbolo** | ✅ COMPLETO | Integración bidireccional y actualización dinámica en tiempo real de gráficos e historial para EUR/USD y GBP/USD desde MT5. |
 | **Detección de Cuenta** | ✅ COMPLETO | Detección automática basada en nombre de servidor broker y trade mode de MT5 (Demo/Real/Fondeo). |
 | **Ejecución y Modificación** | ✅ COMPLETO | Soporte nativo para órdenes BUY, SELL y cancelación con fallback inteligente de Filling Modes (IOC -> FOK -> RETURN). |
 | **Persistencia del Switch** | ✅ COMPLETO | Control absoluto del usuario sobre el switch de cuenta sin reinicios cíclicos automáticos. |
@@ -88,3 +89,12 @@ Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTr
 ## 🚀 Siguientes Pasos
 1. **Visualización de Alertas del Escáner en UI**: Incorporar una consola o log flotante en la interfaz web para pintar las notificaciones del escáner en tiempo real (`scanner_signal`).
 2. **Backtesting Semántico**: Desarrollar scripts de simulación históricos para calibrar la distancia vectorial idónea en ChromaDB.
+3. **Verificación de Lecciones IA**: Verificar la persistencia real de las lecciones en `crt_rules_curated.md` si se requieren ajustes en los prompts de IA.
+4. **Pruebas en Vivo**: Ejecutar el entorno completo (`npm run dev` y `python mt5_bridge.py`) para probar la interacción final del usuario y el sistema.
+
+---
+
+## 📝 Notas Técnicas Importantes
+- **Arquitectura de Sincronización**: `mt5_bridge.py` actúa como orquestador (backend WebSocket). `mock-feed.ts` es el singleton central (frontend) que conecta el WebSocket al store de Zustand (`trading-store.ts`).
+- **Concurrencia**: Las consultas bloqueantes a ChromaDB y MT5 utilizan `asyncio.run_in_executor` para no detener el event loop del WebSocket.
+- **Prevención de Duplicados**: La lógica del Feedback Loop utiliza `processed_deals` en `mt5_bridge.py` para evitar registros duplicados de operaciones cerradas en la base de datos vectorial (ChromaDB).
