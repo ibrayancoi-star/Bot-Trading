@@ -51,6 +51,28 @@ export interface TradeNotification {
   timestamp: number;
 }
 
+export type Strategy = "scalping" | "swing" | "breakout" | "reversal";
+export type KillzoneName = "london" | "newyork" | "asian" | "overlap";
+
+export interface BotConfig {
+  strategy: Strategy;
+  lotSize: number;
+  takeProfitPips: number;
+  stopLossPips: number;
+  maxPositions: number;
+  maxDailyLoss: number;
+  chromaThreshold: number;
+  chromaTopK: number;
+  killzones: Record<KillzoneName, boolean>;
+  trailingStop: boolean;
+  partialClose: boolean;
+  partialClosePct: number;
+  modelTbsRiskMultiplier: number;
+  modelTwsRiskMultiplier: number;
+  hybridM1M15Confluence: boolean;
+  smtDivergenceCheck: boolean;
+}
+
 interface TradingState {
   accountType: "real" | "fondeo" | "demo";
   account: PropAccount;
@@ -60,10 +82,13 @@ interface TradingState {
   risk: RiskMetrics;
   connection: BrokerConnection;
   isBotActive: boolean;
+  botActiveSymbols: string[];
   algoTradingEnabled: boolean;
   notifications: TradeNotification[];
   knownAccounts: Record<string, KnownAccount>;
   historicalTrades: HistoricalTrade[];
+  botConfig: BotConfig;
+  isLeftSidebarOpen: boolean;
 
   // Actions
   setAccountType: (type: "real" | "fondeo" | "demo") => void;
@@ -71,6 +96,7 @@ interface TradingState {
   addPosition: (position: TradePosition) => void;
   closePosition: (id: string, result: TradeResult) => void;
   toggleBot: () => void;
+  toggleBotSymbol: (symbol: string) => void;
   syncAccountFromAPI: (account: Partial<PropAccount>, positions: TradePosition[]) => void;
   checkRiskLimits: () => void;
   logTrade: (result: TradeResult) => void;
@@ -79,6 +105,8 @@ interface TradingState {
   registerKnownAccount: (login: number, server: string, type: "real" | "fondeo" | "demo") => void;
   setHistoricalTrades: (trades: HistoricalTrade[]) => void;
   addHistoricalTrade: (trade: HistoricalTrade) => void;
+  setBotConfig: (config: BotConfig) => void;
+  toggleLeftSidebar: () => void;
 }
 
 export const useTradingStore = create<TradingState>()(
@@ -115,10 +143,30 @@ export const useTradingStore = create<TradingState>()(
         status: "disconnected",
       },
       isBotActive: false,
+      botActiveSymbols: ["EURUSD", "GBPUSD"],
       algoTradingEnabled: false,
       notifications: [],
       knownAccounts: {},
       historicalTrades: [],
+      botConfig: {
+        strategy: "scalping",
+        lotSize: 0.1,
+        takeProfitPips: 20,
+        stopLossPips: 15,
+        maxPositions: 3,
+        maxDailyLoss: 2.5,
+        chromaThreshold: 0.72,
+        chromaTopK: 5,
+        killzones: { asian: false, london: true, overlap: true, newyork: false },
+        trailingStop: false,
+        partialClose: false,
+        partialClosePct: 50,
+        modelTbsRiskMultiplier: 1.0,
+        modelTwsRiskMultiplier: 0.5,
+        hybridM1M15Confluence: true,
+        smtDivergenceCheck: true,
+      },
+      isLeftSidebarOpen: false,
 
       setAccountType: (type) => set({ accountType: type }),
       setHistoricalTrades: (trades) => set({ historicalTrades: trades }),
@@ -153,6 +201,13 @@ export const useTradingStore = create<TradingState>()(
       toggleBot: () =>
         set((state) => ({
           isBotActive: !state.isBotActive,
+        })),
+
+      toggleBotSymbol: (symbol) =>
+        set((state) => ({
+          botActiveSymbols: state.botActiveSymbols.includes(symbol)
+            ? state.botActiveSymbols.filter((s) => s !== symbol)
+            : [...state.botActiveSymbols, symbol],
         })),
 
       syncAccountFromAPI: (accountPatch, positions) =>
@@ -228,6 +283,20 @@ export const useTradingStore = create<TradingState>()(
             },
           };
         }),
+
+      setBotConfig: (config) => {
+        set({ botConfig: config });
+        import("@/lib/data/mock-feed").then(({ sendBotConfig }) => {
+          sendBotConfig(config);
+        }).catch(err => {
+          console.error("Error importando sendBotConfig:", err);
+        });
+      },
+
+      toggleLeftSidebar: () =>
+        set((state) => ({
+          isLeftSidebarOpen: !state.isLeftSidebarOpen,
+        })),
     }),
     {
       name: "ttp-trading-state",

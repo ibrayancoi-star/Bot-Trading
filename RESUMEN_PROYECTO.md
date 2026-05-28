@@ -8,94 +8,141 @@ El proyecto consiste en la creación de una plataforma de trading avanzada (tipo
 2. **Backend/Motor de Ejecución (Python + MT5)**: Un script en segundo plano (`mt5_bridge.py`) que corre localmente, se conecta de manera nativa a la terminal de escritorio de MetaTrader 5 (MT5), extrae ticks en tiempo real, procesa la lógica de las estrategias, ejecuta el control de riesgo y envía las órdenes al broker.
 3. **Módulo de Contexto e Inteligencia (ChromaDB + NLP)**: Un motor de contexto basado en la base de datos vectorial ChromaDB y Transformers que procesa un reglamento en lenguaje natural, filtra operativas por contexto semántico y se retroalimenta automáticamente de las operaciones fallidas.
 
-Esta arquitectura híbrida reemplaza el plan original de conexión externa a cTrader, eliminando las restricciones de KYC, optimizando presupuesto y facilitando el uso de cualquier cuenta demo o real tradicional abierta en la aplicación de escritorio de MT5.
+---
+
+## 🤖 Estado Actual del Bot (Auto Trading)
+
+### Qué funciona:
+- La integración base del motor, el encendido y apagado general (botón "INICIAR BOT" / "DETENER BOT" en el panel derecho).
+- El soporte multi-símbolo (selección de activos EURUSD/GBPUSD).
+- El escáner asíncrono y la detección de oportunidades en background.
+- La evaluación de contexto vectorial (ChromaDB) y las capas de validación.
+- **Interfaz de Configuración de Estrategias:** Un modal flotante independiente con estilo premium que permite modificar la estrategia, gestión de riesgo (TP, SL, pérdida diaria), configuración de ChromaDB, killzones y gestión de operaciones.
+- **Resolución de Bucles de Eco y Conexión (HMR Safe):** Se corrigió la fuga de conexiones WebSocket y la duplicidad de suscriptores Zustand generadas por los refrescos en caliente (Ctrl + F5 y recarga del servidor de Python) y se implementó una cláusula de guarda estricta para evitar la oscilación y bucles infinitos de encendido/apagado.
+
+### Qué no funciona:
+- **Rechazo de Señales por ATR:** Actualmente, el bot en todo momento rechaza las señales detectadas escudándose en las condiciones de validación del ATR.
+
+### Qué falta:
+- **Flexibilidad Completa de Parámetros:** Ajustar el motor de reglas en el backend para que la totalidad de los parámetros enviados desde el frontend (incluyendo los de la metodología CRT) sean respetados, dando total flexibilidad al usuario y evitando rechazos estrictos indeseados.
 
 ---
 
-## 🏗️ Implementaciones Realizadas
+## 🧠 Decisiones Tomadas y Por Qué
 
-### 1. Infraestructura y Arquitectura Base (Next.js)
-- **Framework Core**: Implementado sobre **Next.js 16** (App Router) y React 19.
-- **Estilos y UI**: Configuración de Tailwind CSS v4, `shadcn/ui` y `@base-ui/react` para componentes interactivos y un diseño de vanguardia.
-- **Motor de Gráficos**: Integración de **Lightweight Charts** (`lightweight-charts` v5) en el componente `PriceChart.tsx` para renderizar de manera asíncrona velas y líneas de precios en tiempo real sin caídas de rendimiento.
+1. **Inclusión de Metodología CRT Institucional**
+   - *Decisión:* Se extendió el modal de configuración y el bridge de Python para incorporar multiplicadores de riesgo (TBS/TWS) y confluencias avanzadas (Híbrida M1/M15, Divergencia SMT).
+   - *Por qué:* El usuario necesita mayor control sobre la lógica del algoritmo. Añadir estos parámetros de forma visual permite jugar con la flexibilidad del bot y adaptar su agresividad sin tener que tocar el código fuente del motor en Python.
 
-### 2. Puente Asíncrono de Python & MetaTrader 5 (`mt5_bridge.py`)
-- **Enlace de Datos Nativo**: Conexión directa a la terminal local de MT5 abierta en Windows a través de la librería oficial `MetaTrader5`.
-- **Servidor WebSocket Local**: Servidor de alta velocidad basado en `websockets` en `ws://127.0.0.1:8000` diseñado para servir datos locales en JSON.
-- **Streaming de Cotizaciones (Market Data)**: Bucle asíncrono optimizado de alta frecuencia (10Hz) que consulta precios bid/ask para los pares **EURUSD** y **GBPUSD**, transmitiéndolos a los clientes web activos inmediatamente solo cuando hay cambios.
-- **Sincronización Financiera (Account Info)**: Transmisión en vivo y periódica del estado de la cuenta (balance, equidad, margen, apalancamiento, servidor y número de cuenta) inmediatamente al conectar y en cada actualización de equidad.
-- **Resiliencia de Conexión**: Bucle de verificación persistente para reconectar con MT5 en caso de caídas de la terminal y prevención de apertura forzada.
-- **Múltiples Modos de Llenado (Filling Modes)**: Soporte para múltiples Filling Modes (IOC, FOK, RETURN) de forma secuencial y transparente para adaptarse a cualquier tipo de broker (Demo/Real/Fondeo).
-- **Detección Inteligente de Cuentas**: Detección automática del tipo de cuenta (`fondeo`, `real` o `demo`) mediante la lectura del servidor y palabras clave (`ftmo`, `funding`, `prop`, etc.).
+2. **Interfaz de Configuración como Modal Independiente**
+   - *Decisión:* Se diseñó la configuración del bot como una ventana modal flotante arrastrable en lugar de un panel lateral.
+   - *Por qué:* Maximiza el área del gráfico de precios y mantiene un aspecto premium (simulando software de escritorio) permitiendo cerrarlo sin alterar el layout principal.
 
-### 3. Módulo de Contexto y Base de Datos Vectorial (`context_engine.py`)
-- **Base Vectorial (ChromaDB)**: Integración de ChromaDB en local (`./chroma_db`) para almacenar el reglamento de trading ("crt_rules_curated.md") y la experiencia de trading en formato semántico.
-- **Procesamiento de NLP**: Uso del modelo `sentence-transformers/all-MiniLM-L6-v2` para vectorización 100% offline.
-- **Capas de Reglas**: 
-  - **Capa 1 (Hard Rules)**: Filtros deterministas en `mt5_bridge.py` por zona horaria ("Atlantic/Canary"), Killzones (London, NY), y spread máximo (ratio Spread/ATR).
-  - **Capa 2 (Semántica)**: Validación pre-trade evaluando la similitud del setup propuesto frente al reglamento aceptado.
-  - **Capa 3 (Exclusión y Feedback Loop)**: Sistema de autoaprendizaje que monitorea el historial de MetaTrader (cada 5 segs). Cuando un trade resulta en `LOSS`, se inyecta su contexto semántico como una regla de *exclusión* para bloquear futuras operativas similares.
-
-### 4. Adaptación del Frontend y Zustand Store
-- **Feed Integrado (`mock-feed.ts`)**: Adaptado para conectarse directamente a `ws://127.0.0.1:8000`. Procesa y agrega los ticks en tiempo real en velas de 1 minuto para inyectarlas directamente al gráfico (`PriceChart.tsx`).
-  - **Sincronización Inteligente de Cuenta**: La pestaña del switch se autoselecciona la primera vez que se carga la página o si físicamente cambias de cuenta en MT5 (según login/server), permitiendo al usuario cambiar y permanecer manualmente en la pestaña elegida sin molestas reversiones.
-- **Persistencia Reactiva (`trading-store.ts`)**: Mapeo completo de las métricas recibidas de MT5 para actualizar el balance, equidad, margen libre y evaluar en vivo los cortacircuitos de Drawdown. Añadida la opción de cuenta `demo` en la lógica de estado.
-- **Widget Superior e Inputs**: Selector completo de tres opciones (Real / Fondeo / Demo) y campos configurables para Lotaje, Take Profit (TP) y Stop Loss (SL).
-- **Líneas de Precios en Gráfico**: Representación visual de posiciones activas incluyendo nivel de entrada con PnL dinámico flotante, líneas punteadas de TP y SL directo en el gráfico.
-
-### 5. Módulo Risk Guard (Cortacircuitos de Pérdida)
-- **Monitoreo de Drawdown (10Hz)**: Bucle en segundo plano integrado directamente en la difusión de ticks que calcula en tiempo real la equidad contra el balance inicial del día (`daily_starting_balance`) y total.
-- **Configuración de Umbrales**: Lectura de parámetros de protección (`max_daily_loss_pct` y `max_total_loss_pct`) desde la sección `risk_management` en `config_crt.json`.
-- **Cierre de Pánico Integrado**: Cierre instantáneo y asíncrono de todas las posiciones abiertas en MT5 si se exceden los límites para evitar deslizamiento de precios (slippage).
-- **Bloqueo Operativo Absoluto**: Bloqueo del envío de órdenes desde el puente y desactivación de operaciones hasta el reinicio diario del balance, además del envío de alertas websocket de emergencia (`risk_guard_alert`).
-
-### 6. Optimización de Gráficos e Indicadores
-- **Cálculo en Backend (10Hz)**: Implementado el cálculo en tiempo real de EMA 9, EMA 21, RSI 14 y MACD (12, 26, 9) en `mt5_bridge.py` en base a los precios bid/ask consultados de MT5.
-- **Transmisión de Indicadores**: Actualización del payload del WebSocket para incluir los valores numéricos calculados del backend en el evento `tick`.
-- **Renderizado de EMAs**: Inyección dinámica en Lightweight Charts de las líneas de EMA 9 (azul `#38bdf8`) y EMA 21 (rojo/naranja `#f97316`) con anchos de línea de 1.5.
-- **Sub-panel de Osciladores**: Creación de una barra flotante premium en el gráfico de la web UI para mostrar los valores en tiempo real del RSI (con alertas de color reactivo para sobrecompra/sobreventa) y de las líneas/histograma de MACD.
-
-### 7. UI de Historial Extendida (Experiencia de ChromaDB)
-- **Servicio Fullstack**: Canalización de las experiencias del Feedback Loop de ChromaDB en tiempo real hacia el frontend mediante los eventos `history_init` (carga inicial masiva de las últimas 20 operaciones) y `history_update` (actualizaciones reactivas tras cada cierre de posición).
-- **Componente HistoryPanel**: Panel interactivo premium con KPIs cuantitativos en vivo (Win Rate, Pips Netos, Relación W/L) y filas expandibles para revelar los diagnósticos y reflexiones semánticas almacenadas por el motor de IA.
-- **Navegación por Pestañas**: Reestructuración del panel inferior (`BottomPanel.tsx`) con tabs reactivas tipo TradingView que integran insignias de conteo dinámico sobre posiciones activas e historial.
-
-### 8. Escáner de Estrategia Automatizado (Strategy Scanner Loop)
-- **Monitoreo de Velas de Anclaje (HTF)**: Bucle persistente que calcula los rangos clave de referencia de MetaTrader 5 (CRT High, CRT Low y Equilibrium EQ) al cierre de las velas definidas en Canarias (06:00, 10:00, 14:00), alineadas matemáticamente con la sesión de Nueva York.
-- **Soporte Multi-Par Simultáneo**: El escáner evalúa oportunidades de manera concurrente, detectando y ejecutando posiciones en **EUR/USD** y **GBP/USD** al mismo tiempo.
-- **Detección de Barridos (Sweeps) en Tiempo Real**: Escaneo continuo de precios a 1Hz. Cuando la cotización rompe los extremos en una Killzone activa, pre-activa la alerta de barrido de liquidez.
-- **Ejecución y Disparo Autónomo**: Si las reglas duras (Capa 1) y de contexto vectorial (Capa 2/3) se aprueban, realiza el envío automático de la orden (`order_send`) con Stop Loss adaptado y Take Profit objetivo en el Equilibrium (EQ), informando del estado de cada señal (DETECTED, DISMISSED, EXECUTED) al frontend por WebSocket.
+3. **Estructura HMR-Safe y Persistencia de Estado de Conexión en `window`**
+   - *Decisión:* Almacenar el socket activo, las flags de suscripción y persistir las variables clave de Zustand (`botConfig`, `isBotActive`, `botActiveSymbols`) en `localStorage`.
+   - *Por qué:* En desarrollo (Next.js con hot-reloading), re-evaluar los módulos creaba múltiples conexiones huérfanas de WebSocket en segundo plano y registraba múltiples callbacks suscriptores que colisionaban entre sí. Al persistirlos y gestionarlos en el objeto global `window`, garantizamos una sola conexión activa y una única suscripción global que sincroniza de forma limpia el estado del bot.
 
 ---
 
-## 🚀 Estado del Proyecto (Actualizado Mayo-2026)
+## 🎯 Próximo Paso Exacto
 
-| Área | Estado | Detalle |
-| :--- | :---: | :--- |
-| **Frontend UI** | ✅ COMPLETO | Switch de 3 cuentas, inputs interactivos de trading en panel lateral, visualización de métricas y balance/equity reactivo. |
-| **Integración de Gráfico** | ✅ COMPLETO | Conexión a Lightweight Charts asíncrona, velas en vivo y líneas visuales de órdenes activas (Precio, SL, TP). |
-| **Soporte Multi-Símbolo** | ✅ COMPLETO | Integración bidireccional y actualización dinámica en tiempo real de gráficos e historial para EUR/USD y GBP/USD desde MT5. |
-| **Detección de Cuenta** | ✅ COMPLETO | Detección automática basada en nombre de servidor broker y trade mode de MT5 (Demo/Real/Fondeo). |
-| **Ejecución y Modificación** | ✅ COMPLETO | Soporte nativo para órdenes BUY, SELL y cancelación con fallback inteligente de Filling Modes (IOC -> FOK -> RETURN). |
-| **Persistencia del Switch** | ✅ COMPLETO | Control absoluto del usuario sobre el switch de cuenta sin reinicios cíclicos automáticos. |
-| **Módulo de Contexto** | ✅ COMPLETO | Motor ChromaDB integrado offline. Reglas curadas importadas (Capa 1 y Capa 2/3). |
-| **Feedback Loop (IA)** | ✅ COMPLETO | Tarea asíncrona en `mt5_bridge.py` que registra resultados de trades y genera exclusiones automáticas de setups fallidos. |
-| **Módulo Risk Guard** | ✅ COMPLETO | Cortacircuitos de Drawdown en tiempo real (10Hz) con cierre de pánico de posiciones y bloqueo de operativas. |
-| **Optimización de Indicadores** | ✅ COMPLETO | Renderizado dinámico de EMA 9/EMA 21 y barra de estado flotante para osciladores RSI y MACD. |
-| **UI de Historial Extendida** | ✅ COMPLETO | Panel inferior con pestañas, badges de conteo y renderizado de diagnósticos del Feedback Loop. |
-| **Escáner Autónomo** | ✅ COMPLETO | Detección de barridos H4, validaciones multicapa automáticas y ejecución directa en MT5 sin intervención humana. |
+1. **Poder Ajustar los Parámetros en su Totalidad / Lógica del ATR:** Revisar la lógica dura de validación en Python (`validate_hard_rules` y cálculos de ATR) para permitir jugar con la flexibilidad del bot. La idea es que los parámetros dictados por el usuario desde el modal reemplacen o flexibilicen las restricciones estrictas que causan el rechazo constante de operaciones.
 
 ---
 
-## 🚀 Siguientes Pasos
-1. **Visualización de Alertas del Escáner en UI**: Incorporar una consola o log flotante en la interfaz web para pintar las notificaciones del escáner en tiempo real (`scanner_signal`).
-2. **Backtesting Semántico**: Desarrollar scripts de simulación históricos para calibrar la distancia vectorial idónea en ChromaDB.
-3. **Verificación de Lecciones IA**: Verificar la persistencia real de las lecciones en `crt_rules_curated.md` si se requieren ajustes en los prompts de IA.
-4. **Pruebas en Vivo**: Ejecutar el entorno completo (`npm run dev` y `python mt5_bridge.py`) para probar la interacción final del usuario y el sistema.
+## 📜 Resumen del Código Completo Más Reciente (LeftSidebar.tsx modal con CRT)
+
+```tsx
+"use client";
+
+import { useState, useEffect } from "react";
+import { useTradingStore, type BotConfig, type Strategy, type KillzoneName } from "@/lib/store/trading-store";
+import { Button } from "@/components/ui/button";
+import { Sparkles, Settings, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+export function LeftSidebar() {
+  const isLeftSidebarOpen = useTradingStore((s) => s.isLeftSidebarOpen);
+  const toggleLeftSidebar = useTradingStore((s) => s.toggleLeftSidebar);
+  const botConfig = useTradingStore((s) => s.botConfig);
+  const setBotConfig = useTradingStore((s) => s.setBotConfig);
+
+  // Estados locales, ahora incluyendo reglas CRT
+  const [strategy, setStrategy] = useState<Strategy>("scalping");
+  // ... (estados previos de riesgo y Chroma omitidos por brevedad)
+  const [modelTbsRiskMultiplier, setModelTbsRiskMultiplier] = useState<number>(1.0);
+  const [modelTwsRiskMultiplier, setModelTwsRiskMultiplier] = useState<number>(0.5);
+  const [hybridM1M15Confluence, setHybridM1M15Confluence] = useState<boolean>(true);
+  const [smtDivergenceCheck, setSmtDivergenceCheck] = useState<boolean>(true);
+
+  // Dragging states omitidos...
+
+  useEffect(() => {
+    if (botConfig) {
+      // Sincronización de estados
+      if (botConfig.modelTbsRiskMultiplier !== undefined) setModelTbsRiskMultiplier(botConfig.modelTbsRiskMultiplier);
+      if (botConfig.modelTwsRiskMultiplier !== undefined) setModelTwsRiskMultiplier(botConfig.modelTwsRiskMultiplier);
+      if (botConfig.hybridM1M15Confluence !== undefined) setHybridM1M15Confluence(botConfig.hybridM1M15Confluence);
+      if (botConfig.smtDivergenceCheck !== undefined) setSmtDivergenceCheck(botConfig.smtDivergenceCheck);
+    }
+  }, [botConfig]);
+
+  const handleApply = () => {
+    const config: BotConfig = {
+      strategy, /* ... otros configs ... */
+      modelTbsRiskMultiplier,
+      modelTwsRiskMultiplier,
+      hybridM1M15Confluence,
+      smtDivergenceCheck,
+    };
+    setBotConfig(config);
+    toggleLeftSidebar();
+  };
+
+  if (!isLeftSidebarOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="flex w-96 max-h-[85vh] flex-col border border-zinc-800 bg-zinc-950 rounded-xl shadow-2xl overflow-y-auto">
+        {/* Cabecera y secciones anteriores omitidas */}
+        
+        {/* Sección 6: Metodología CRT Institucional */}
+        <div className="p-4 flex flex-col gap-3">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold text-tv-text-muted uppercase">
+            <Sparkles className="h-3.5 w-3.5 text-tv-blue animate-pulse" />
+            <span>⚡ METODOLOGÍA CRT INSTITUCIONAL</span>
+          </div>
+
+          <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
+            <div className="flex items-center">
+              <span className="text-[11px] text-tv-text-muted">Multiplicador TBS</span>
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.modelTbsRiskMultiplier ?? 1.0})</span>
+            </div>
+            <input
+              type="number" step="0.1"
+              value={modelTbsRiskMultiplier}
+              onChange={(e) => setModelTbsRiskMultiplier(parseFloat(e.target.value) || 1.0)}
+              className="bg-transparent text-right text-xs font-mono text-tv-text outline-none w-16"
+            />
+          </div>
+          {/* ... Inputs de TWS, Híbrida y SMT ... */}
+        </div>
+
+        {/* Botón de Aplicar */}
+        <div className="p-4 mt-auto border-t border-zinc-800 bg-zinc-900/30">
+          <Button onClick={handleApply}>APLICAR CONFIGURACIÓN</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
 
 ---
 
-## 📝 Notas Técnicas Importantes
-- **Arquitectura de Sincronización**: `mt5_bridge.py` actúa como orquestador (backend WebSocket). `mock-feed.ts` es el singleton central (frontend) que conecta el WebSocket al store de Zustand (`trading-store.ts`).
-- **Concurrencia**: Las consultas bloqueantes a ChromaDB y MT5 utilizan `asyncio.run_in_executor` para no detener el event loop del WebSocket.
-- **Prevención de Duplicados**: La lógica del Feedback Loop utiliza `processed_deals` en `mt5_bridge.py` para evitar registros duplicados de operaciones cerradas en la base de datos vectorial (ChromaDB).
+## 🏗️ Implementaciones Realizadas (Histórico)
+* Frontend Reactivo Next.js + Tailwind.
+* Puente asíncrono con MetaTrader 5 y WebSocket (`mt5_bridge.py`).
+* Integración ChromaDB y modelos NLP.
+* Motor de gráficos asíncronos Lightweight Charts.
+* Escáner Autónomo y Risk Guard System.

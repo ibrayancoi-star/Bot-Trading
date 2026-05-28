@@ -154,7 +154,7 @@ function startTickEngine() {
     if (subscriptions.length === 0) return;
 
     // Si la conexión real con MT5 está activa, no generamos ticks simulados
-    if (isBridgeLive) return;
+    if (bridgeState.isBridgeLive) return;
 
     const symbol = typeof window !== "undefined" ? useChartStore.getState().symbol : "EURUSD";
     const { isJPY, priceMin, priceMax, tickMove } = getSymbolParams(symbol);
@@ -212,22 +212,32 @@ function stopTickEngine() {
 }
 
 // Variables globales para la conexión WebSocket con el puente MT5 de Python
-let localSocket: WebSocket | null = null;
-let isBridgeConnecting = false;
-let isBridgeLive = false;
+const g = typeof window !== "undefined" ? (window as any) : {} as any;
+
+if (!g.__mt5_bridge_state__) {
+  g.__mt5_bridge_state__ = {
+    localSocket: null,
+    isBridgeConnecting: false,
+    isBridgeLive: false,
+    chartStoreSubscribed: false,
+    tradingStoreSubscribed: false
+  };
+}
+
+const bridgeState = g.__mt5_bridge_state__;
 
 // Callbacks para despachar ticks y el historial al suscriptor activo
 let activeOnCandleCallback: ((c: Candle) => void) | null = null;
 let activeOnHistoryCallback: ((history: Candle[]) => void) | null = null;
 
 export function requestHistoryFromBridge(symbol: string, timeframe: string) {
-  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+  if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
     const msg = {
       action: "request_history",
-      symbol: "EURUSD", // Enfocado en EURUSD
+      symbol: symbol,
       timeframe,
     };
-    localSocket.send(JSON.stringify(msg));
+    bridgeState.localSocket.send(JSON.stringify(msg));
     console.log(`📤 [MT5 Bridge] Solicitando historial para ${msg.symbol} (${msg.timeframe})`);
   } else {
     console.warn("⚠️ [MT5 Bridge] WebSocket no listo para solicitar historial.");
@@ -235,7 +245,7 @@ export function requestHistoryFromBridge(symbol: string, timeframe: string) {
 }
 
 export function sendTradeOrder(symbol: string, type: "buy" | "sell", volume: number, tp: number = 0, sl: number = 0) {
-  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+  if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
     const msg = {
       action: type,
       symbol,
@@ -243,7 +253,7 @@ export function sendTradeOrder(symbol: string, type: "buy" | "sell", volume: num
       tp,
       sl
     };
-    localSocket.send(JSON.stringify(msg));
+    bridgeState.localSocket.send(JSON.stringify(msg));
     console.log(`📤 [MT5 Bridge] Enviando orden de ${type.toUpperCase()} para ${symbol} (${volume} lotes)`);
   } else {
     console.warn("⚠️ [MT5 Bridge] WebSocket no listo para enviar orden.");
@@ -251,14 +261,14 @@ export function sendTradeOrder(symbol: string, type: "buy" | "sell", volume: num
 }
 
 export function modifyPosition(ticket: number, tp: number, sl: number) {
-  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+  if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
     const msg = {
       action: "modify_position",
       ticket,
       tp,
       sl
     };
-    localSocket.send(JSON.stringify(msg));
+    bridgeState.localSocket.send(JSON.stringify(msg));
     console.log(`📤 [MT5 Bridge] Modificando posición ${ticket} (TP: ${tp}, SL: ${sl})`);
   } else {
     console.warn("⚠️ [MT5 Bridge] WebSocket no listo para modificar orden.");
@@ -266,54 +276,79 @@ export function modifyPosition(ticket: number, tp: number, sl: number) {
 }
 
 export function closePositionOnBridge(ticket: number) {
-  if (localSocket && localSocket.readyState === WebSocket.OPEN) {
+  if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
     const msg = {
       action: "close_position",
       ticket,
     };
-    localSocket.send(JSON.stringify(msg));
+    bridgeState.localSocket.send(JSON.stringify(msg));
     console.log(`📤 [MT5 Bridge] Solicitando cierre de posición ${ticket}`);
   } else {
     console.warn("⚠️ [MT5 Bridge] WebSocket no listo para cerrar posición.");
   }
 }
 
+export function sendBotConfig(config: any) {
+  if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
+    bridgeState.localSocket.send(JSON.stringify({
+      action: "BOT_CONFIG_UPDATE",
+      payload: config
+    }));
+    console.log("📤 [MT5 Bridge] Enviando actualización de configuración de bot:", config);
+  } else {
+    console.warn("⚠️ [MT5 Bridge] WebSocket no listo para enviar configuración del bot.");
+  }
+}
+
 // Suscribir el WebSocket a Zustand de manera global (se ejecuta una sola vez)
 if (typeof window !== "undefined") {
-  let lastTimeframe = useChartStore.getState().timeframe;
-  useChartStore.subscribe((state) => {
-    if (state.timeframe !== lastTimeframe) {
-      const prev = lastTimeframe;
-      lastTimeframe = state.timeframe;
-      if (localSocket && localSocket.readyState === WebSocket.OPEN) {
-        console.log(`📡 [Zustand Sync] Cambio de Timeframe detectado en Zustand: ${prev} -> ${state.timeframe}. Solicitando historial a MT5...`);
-        localSocket.send(JSON.stringify({
-          action: "request_history",
-          symbol: "EURUSD",
-          timeframe: state.timeframe
-        }));
+  if (!bridgeState.chartStoreSubscribed) {
+    bridgeState.chartStoreSubscribed = true;
+    let lastTimeframe = useChartStore.getState().timeframe;
+    let lastSymbol = useChartStore.getState().symbol;
+    useChartStore.subscribe((state) => {
+      if (state.timeframe !== lastTimeframe || state.symbol !== lastSymbol) {
+        const prevTf = lastTimeframe;
+        const prevSym = lastSymbol;
+        lastTimeframe = state.timeframe;
+        lastSymbol = state.symbol;
+        if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
+          console.log(`📡 [Zustand Sync] Cambio detectado: ${prevSym} ${prevTf} -> ${state.symbol} ${state.timeframe}. Solicitando historial a MT5...`);
+          bridgeState.localSocket.send(JSON.stringify({
+            action: "request_history",
+            symbol: state.symbol,
+            timeframe: state.timeframe
+          }));
+        }
       }
-    }
-  });
+    });
+  }
 
-  let lastBotActive = useTradingStore.getState().isBotActive;
-  useTradingStore.subscribe((state) => {
-    if (state.isBotActive !== lastBotActive) {
-      lastBotActive = state.isBotActive;
-      if (localSocket && localSocket.readyState === WebSocket.OPEN) {
-        console.log(`📡 [Zustand Sync] Cambio de estado de bot detectado: ${state.isBotActive}. Enviando a MT5...`);
-        localSocket.send(JSON.stringify({
-          action: "toggle_bot",
-          active: state.isBotActive
-        }));
+  if (!bridgeState.tradingStoreSubscribed) {
+    bridgeState.tradingStoreSubscribed = true;
+    let lastBotActive = useTradingStore.getState().isBotActive;
+    let lastBotSymbols = useTradingStore.getState().botActiveSymbols;
+    useTradingStore.subscribe((state) => {
+      const symbolsChanged = JSON.stringify(state.botActiveSymbols) !== JSON.stringify(lastBotSymbols);
+      if (state.isBotActive !== lastBotActive || symbolsChanged) {
+        lastBotActive = state.isBotActive;
+        lastBotSymbols = state.botActiveSymbols;
+        if (bridgeState.localSocket && bridgeState.localSocket.readyState === WebSocket.OPEN) {
+          console.log(`📡 [Zustand Sync] Cambio de estado de bot detectado. Enviando a MT5...`);
+          bridgeState.localSocket.send(JSON.stringify({
+            action: "toggle_bot",
+            active: state.isBotActive,
+            symbols: state.botActiveSymbols
+          }));
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 function connectLocalMT5Bridge() {
-  if (localSocket || isBridgeConnecting) return;
-  isBridgeConnecting = true;
+  if (bridgeState.localSocket || bridgeState.isBridgeConnecting) return;
+  bridgeState.isBridgeConnecting = true;
 
   useTradingStore.setState({ connection: { status: "connecting" } });
   console.log("🔌 [MT5 Bridge] Conectando a ws://127.0.0.1:8000...");
@@ -322,9 +357,9 @@ function connectLocalMT5Bridge() {
 
   socket.onopen = () => {
     console.log("✅ [MT5 Bridge] Conectado exitosamente al puente de Python.");
-    localSocket = socket;
-    isBridgeConnecting = false;
-    isBridgeLive = true;
+    bridgeState.localSocket = socket;
+    bridgeState.isBridgeConnecting = false;
+    bridgeState.isBridgeLive = true;
 
     useTradingStore.setState({
       connection: {
@@ -336,16 +371,27 @@ function connectLocalMT5Bridge() {
     // Petición de historial inicial en la conexión (Cold Start)
     const currentState = useChartStore.getState();
     const currentBotActive = useTradingStore.getState().isBotActive;
-    console.log(`📡 [MT5 Bridge] Petición inicial de historial (Cold Start) para: ${currentState.timeframe}`);
+    console.log(`📡 [MT5 Bridge] Petición inicial de historial (Cold Start) para: ${currentState.symbol} ${currentState.timeframe}`);
     socket.send(JSON.stringify({
       action: "request_history",
-      symbol: "EURUSD",
+      symbol: currentState.symbol,
       timeframe: currentState.timeframe
     }));
+    const currentBotSymbols = useTradingStore.getState().botActiveSymbols;
     socket.send(JSON.stringify({
       action: "toggle_bot",
-      active: currentBotActive
+      active: currentBotActive,
+      symbols: currentBotSymbols
     }));
+
+    // Sincronizar configuración inicial del bot
+    const currentBotConfig = useTradingStore.getState().botConfig;
+    if (currentBotConfig) {
+      socket.send(JSON.stringify({
+        action: "BOT_CONFIG_UPDATE",
+        payload: currentBotConfig
+      }));
+    }
   };
 
   socket.onmessage = (event) => {
@@ -542,9 +588,9 @@ function connectLocalMT5Bridge() {
 
   socket.onclose = () => {
     console.warn("🛑 [MT5 Bridge] Conexión cerrada. Intentando reconectar en 3s...");
-    localSocket = null;
-    isBridgeConnecting = false;
-    isBridgeLive = false;
+    bridgeState.localSocket = null;
+    bridgeState.isBridgeConnecting = false;
+    bridgeState.isBridgeLive = false;
 
     useTradingStore.setState({
       connection: {

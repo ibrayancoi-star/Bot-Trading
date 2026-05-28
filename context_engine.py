@@ -91,11 +91,11 @@ def initialize_vector_db(md_path="crt_rules_curated.md"):
     else:
         print("[ContextEngine] No se encontraron reglas válidas en el archivo para indexar.")
 
-def validate_market_context(setup_name: str, market_snapshot: str) -> dict:
+def validate_market_context(setup_name: str, market_snapshot: str, chroma_threshold: float = 1.1, chroma_top_k: int = 2) -> dict:
     """
     Realiza una consulta por similitud combinando setup y market_snapshot.
-    Recupera los 2 resultados más cercanos (n_results=2).
-    Si la distancia es < 1.1 y el fragmento es de tipo 'capa_3_exclusion' o contiene palabras
+    Recupera los resultados más cercanos (n_results=chroma_top_k).
+    Si la distancia es < chroma_threshold y el fragmento es de tipo 'capa_3_exclusion' o contiene palabras
     como 'invalida', 'prohibido' o 'cancelar', devuelve:
       {"approved": False, "reason": "Motivo del bloqueo", "distance": float}
     De lo contrario, devuelve:
@@ -106,7 +106,7 @@ def validate_market_context(setup_name: str, market_snapshot: str) -> dict:
     try:
         results = collection.query(
             query_texts=[query_text],
-            n_results=2
+            n_results=chroma_top_k
         )
     except Exception as e:
         print(f"[ContextEngine] Error en la consulta de similitud: {e}")
@@ -126,12 +126,12 @@ def validate_market_context(setup_name: str, market_snapshot: str) -> dict:
         meta_type = metadata.get("type", "") if metadata else ""
         doc_lower = document.lower()
 
-        # Condición de bloqueo: distancia baja (< 1.1) y
+        # Condición de bloqueo: distancia baja (< chroma_threshold) y
         # (tipo exclusion o palabras clave en el fragmento)
         is_exclusion = (meta_type == "capa_3_exclusion")
         has_block_keywords = any(kw in doc_lower for kw in ["invalida", "prohibido", "cancelar"])
 
-        if distance < 1.1 and (is_exclusion or has_block_keywords):
+        if distance < chroma_threshold and (is_exclusion or has_block_keywords):
             reason_msg = f"Regla/Bloqueo detectado: {metadata.get('title', 'Regla de exclusión')}."
             # Si el documento tiene palabras clave específicas o es una experiencia de pérdida
             if "loss" in doc_lower:

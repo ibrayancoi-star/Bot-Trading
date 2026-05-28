@@ -5,13 +5,13 @@ import { useTradingStore } from "@/lib/store/trading-store";
 import { useChartStore } from "@/lib/store/chart-store";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { TrendingUp, TrendingDown, Trash2, AlertTriangle } from "lucide-react";
+import { TrendingUp, TrendingDown, Trash2, AlertTriangle, Settings } from "lucide-react";
 import { AccountStats } from "@/components/dashboard/AccountStats";
 import { sendTradeOrder, closePositionOnBridge } from "@/lib/data/mock-feed";
 import { cn } from "@/lib/utils";
 
 export function RightSidebar() {
-  const { accountType, setAccountType, positions, isBotActive, toggleBot, connection, account, algoTradingEnabled, knownAccounts } = useTradingStore();
+  const { accountType, setAccountType, positions, isBotActive, toggleBot, botActiveSymbols, toggleBotSymbol, connection, account, algoTradingEnabled, knownAccounts, toggleLeftSidebar } = useTradingStore();
   const symbol = useChartStore((s) => s.symbol);
 
   const [lotSize, setLotSize] = useState<number>(0.1);
@@ -41,7 +41,7 @@ export function RightSidebar() {
 
   return (
     <aside className="flex w-64 flex-col border-l border-tv-border bg-tv-panel overflow-y-auto overflow-x-hidden">
-      
+
       {/* Connection Info (Cuenta Activa) */}
       <div className="p-4 pb-2 text-[10px] text-tv-text-muted flex flex-col gap-1 bg-tv-bg/80">
         <div className="flex justify-between items-center">
@@ -68,8 +68,8 @@ export function RightSidebar() {
               .map((ka) => {
                 const isCurrent = ka.login === account.login && ka.server === account.server;
                 return (
-                  <div 
-                    key={`${ka.server}_${ka.login}`} 
+                  <div
+                    key={`${ka.server}_${ka.login}`}
                     className={cn(
                       "flex items-center justify-between text-[10px] rounded px-2 py-1",
                       isCurrent ? "bg-tv-blue/20 border border-tv-blue/30 text-tv-text" : "bg-tv-bg/50 text-tv-text-muted"
@@ -92,8 +92,8 @@ export function RightSidebar() {
                         className={cn(
                           "text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm appearance-none cursor-pointer outline-none text-center",
                           ka.type === "real" ? "bg-blue-900/40 text-blue-400" :
-                          ka.type === "fondeo" ? "bg-purple-900/40 text-purple-400" :
-                          "bg-gray-800 text-gray-400"
+                            ka.type === "fondeo" ? "bg-purple-900/40 text-purple-400" :
+                              "bg-gray-800 text-gray-400"
                         )}
                       >
                         <option value="real" className="bg-tv-panel text-blue-400">REAL</option>
@@ -134,17 +134,48 @@ export function RightSidebar() {
           </h3>
           <div className={cn("h-2.5 w-2.5 rounded-full", isBotActive ? "bg-tv-green animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]" : "bg-tv-red")} />
         </div>
-        <Button
-          onClick={toggleBot}
-          className={cn(
-            "w-full h-10 text-xs font-bold transition-all",
-            isBotActive
-              ? "bg-tv-red/10 text-tv-red border border-tv-red/20 hover:bg-tv-red hover:text-white"
-              : "bg-tv-blue/10 text-tv-blue border border-tv-blue/20 hover:bg-tv-blue hover:text-white"
-          )}
-        >
-          {isBotActive ? "DETENER BOT" : "INICIAR BOT"}
-        </Button>
+
+        <div className="flex flex-col gap-2 mb-3">
+          <div className="text-[10px] text-tv-text-muted">Activos para Escáner:</div>
+          <div className="flex gap-2">
+            {["EURUSD", "GBPUSD"].map((sym) => (
+              <button
+                key={sym}
+                onClick={() => toggleBotSymbol(sym)}
+                className={cn(
+                  "flex-1 py-1 rounded text-[10px] font-medium transition-colors border cursor-pointer",
+                  botActiveSymbols.includes(sym)
+                    ? "bg-tv-blue/20 text-tv-blue border-tv-blue/50"
+                    : "bg-tv-panel text-tv-text-muted border-tv-border hover:bg-tv-panel-hover"
+                )}
+              >
+                {sym}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex gap-2">
+          <Button
+            onClick={toggleBot}
+            className={cn(
+              "flex-1 h-10 text-xs font-bold transition-all",
+              isBotActive
+                ? "bg-tv-red/10 text-tv-red border border-tv-red/20 hover:bg-tv-red hover:text-white"
+                : "bg-tv-blue/10 text-tv-blue border border-tv-blue/20 hover:bg-tv-blue hover:text-white"
+            )}
+          >
+            {isBotActive ? "DETENER BOT" : "INICIAR BOT"}
+          </Button>
+          
+          <Button
+            onClick={toggleLeftSidebar}
+            className="w-10 h-10 bg-tv-panel text-tv-text border border-tv-border hover:bg-tv-panel-hover flex items-center justify-center cursor-pointer"
+            title="Configurar Bot"
+          >
+            <Settings className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <Separator className="bg-tv-border" />
@@ -154,36 +185,36 @@ export function RightSidebar() {
         <h3 className="mb-4 text-[11px] font-semibold uppercase tracking-wider text-tv-text-muted">
           Ejecución de Mercado
         </h3>
-        
+
         {/* Configuración de Orden */}
         <div className="flex flex-col gap-3 mb-4">
           <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
             <span className="text-xs text-tv-text-muted">Lotaje</span>
-            <input 
-              type="number" 
-              step="0.01" 
+            <input
+              type="number"
+              step="0.01"
               min="0.01"
-              value={lotSize} 
+              value={lotSize}
               onChange={(e) => setLotSize(parseFloat(e.target.value) || 0)}
               className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-16"
             />
           </div>
           <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
             <span className="text-xs text-tv-text-muted">TP Price</span>
-            <input 
-              type="number" 
-              step="0.0001" 
-              value={tp} 
+            <input
+              type="number"
+              step="0.0001"
+              value={tp}
               onChange={(e) => setTp(parseFloat(e.target.value) || 0)}
               className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-24"
             />
           </div>
           <div className="flex justify-between items-center bg-tv-bg border border-tv-border rounded-md px-3 py-2">
             <span className="text-xs text-tv-text-muted">SL Price</span>
-            <input 
-              type="number" 
-              step="0.0001" 
-              value={sl} 
+            <input
+              type="number"
+              step="0.0001"
+              value={sl}
               onChange={(e) => setSl(parseFloat(e.target.value) || 0)}
               className="bg-transparent text-right text-sm font-mono text-tv-text outline-none w-24"
             />

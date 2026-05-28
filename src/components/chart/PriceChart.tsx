@@ -888,44 +888,20 @@ export function PriceChart({ symbol, timeframe }: Props) {
   useEffect(() => {
     let unsub: (() => void) | null = null;
 
-    // ── 1. Load historical candles (Mock as fallback) ───────────────────────
-    const klines = generateHistoricalData(500);
-    candlesRef.current = klines;
+    // ── 1. Clear chart while waiting for MT5 history ───────────────────────
+    candlesRef.current = [];
 
     if (candleSeriesRef.current) {
-      candleSeriesRef.current.setData(
-        klines.map((k) => ({
-          time: k.time as UTCTimestamp,
-          open: k.open,
-          high: k.high,
-          low: k.low,
-          close: k.close,
-        })),
-      );
+      candleSeriesRef.current.setData([]);
     }
     if (volumeSeriesRef.current) {
-      volumeSeriesRef.current.setData(
-        klines.map((k) => ({
-          time: k.time as UTCTimestamp,
-          value: k.volume,
-          color: k.close >= k.open ? `${TV_COLORS.green}66` : `${TV_COLORS.red}66`,
-        })),
-      );
+      volumeSeriesRef.current.setData([]);
     }
     updateEMAs();
     updateRSI();
     updateMACD();
     chartRef.current?.timeScale().fitContent();
     requestAnimationFrame(() => recomputePaneOffsets());
-
-    if (klines.length > 0) {
-      const last = klines[klines.length - 1];
-      const prev = klines[klines.length - 2] ?? last;
-      setLastPrice({
-        value: last.close,
-        pct: prev.close === 0 ? 0 : ((last.close - prev.close) / prev.close) * 100,
-      });
-    }
 
     // ── 2. Subscribe to real-time ticks & MT5 history updates ───────────────
     unsub = subscribeMockFeed(

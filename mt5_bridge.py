@@ -10,6 +10,35 @@ import datetime
 import time
 from zoneinfo import ZoneInfo
 from context_engine import initialize_vector_db, validate_market_context, add_trade_experience, get_historical_trades_text
+from dataclasses import dataclass, field
+from typing import Dict
+import threading
+
+@dataclass
+class BotConfig:
+    strategy: str = "scalping"
+    lot_size: float = 0.1
+    take_profit_pips: int = 20
+    stop_loss_pips: int = 15
+    max_positions: int = 3
+    max_daily_loss: float = 2.5
+    chroma_threshold: float = 0.72
+    chroma_top_k: int = 5
+    killzones: Dict[str, bool] = field(default_factory=lambda: {
+        "asian": False, "london": True, "overlap": True, "newyork": False
+    })
+    trailing_stop: bool = False
+    partial_close: bool = False
+    partial_close_pct: int = 50
+    model_tbs_risk_multiplier: float = 1.0
+    model_tws_risk_multiplier: float = 0.5
+    hybrid_m1_m15_confluence: bool = True
+    smt_divergence_check: bool = True
+
+# Variable global mutable (hilo-segura)
+_config_lock = threading.Lock()
+bot_config = BotConfig()
+
 
 # Configuración de Logs
 logging.basicConfig(
@@ -58,6 +87,7 @@ risk_config = {
 
 # Bot Active State (sincronizado con la interfaz web)
 BOT_ACTIVE = False
+ACTIVE_BOT_SYMBOLS = ["EURUSD", "GBPUSD"]
 
 # Últimos ticks conocidos para evitar envíos redundantes
 last_ticks = {
@@ -425,6 +455,23 @@ def update_reference_ranges():
     except Exception as e:
         logger.error(f"Error en update_reference_ranges: {e}")
 
+def is_in_active_killzone() -> bool:
+    """Retorna True si la hora UTC actual está dentro de alguna killzone activa."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc).hour * 60 + datetime.datetime.now(datetime.timezone.utc).minute
+    with _config_lock:
+        kz = bot_config.killzones
+
+    windows = {
+        "asian":   (2*60,   5*60),   # 02:00–05:00 UTC
+        "london":  (7*60,  10*60),   # 07:00–10:00 UTC
+        "overlap": (12*60, 15*60),   # 12:00–15:00 UTC
+        "newyork": (13*60, 16*60),   # 13:00–16:00 UTC
+    }
+    for name, (start, end) in windows.items():
+        if kz.get(name) and start <= now_utc <= end:
+            return True
+    return False
+
 async def strategy_scanner_task():
     """
     Bucle en segundo plano que monitorea en tiempo real barridos de liquidez (Sweeps)
@@ -453,7 +500,11 @@ async def strategy_scanner_task():
                     await asyncio.sleep(1.0)
                     continue
                 
-                for symbol in ["EURUSD", "GBPUSD"]:
+                if not is_in_active_killzone():
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                for symbol in ACTIVE_BOT_SYMBOLS:
                     broker_sym = get_broker_symbol(symbol)
                     
                     # Evitar duplicar si ya hay una posición abierta para el par
@@ -540,9 +591,17 @@ async def strategy_scanner_task():
                             f"CRT_LOW: {crt_low:.5f}, ATR: {ltf_atr:.1f}, Spread: {current_spread_points/10.0:.1f} pips."
                         )
                         
+                        # Obtener parámetros dinámicos del bot de manera segura para hilos
+                        with _config_lock:
+                            lot = bot_config.lot_size
+                            tp_pips = bot_config.take_profit_pips
+                            sl_pips = bot_config.stop_loss_pips
+                            threshold = bot_config.chroma_threshold
+                            top_k = bot_config.chroma_top_k
+
                         loop = asyncio.get_running_loop()
                         validation_res = await loop.run_in_executor(
-                            None, validate_market_context, setup_name, market_snapshot
+                            None, validate_market_context, setup_name, market_snapshot, threshold, top_k
                         )
                         
                         if not validation_res.get("approved", True):
@@ -563,18 +622,17 @@ async def strategy_scanner_task():
                             continue
 
                         # --- AMBAS CAPAS APROBADAS: DISPARO AUTÓNOMO ---
-                        # Calcular SL: Extremo del barrido más holgura (1.5 * ATR de 1m)
-                        # Calcular TP: Punto medio de equilibrio (EQ) de la vela de anclaje
-                        eq_tp = anchor_ranges[symbol]["eq"]
-                        
+                        # Calcular SL y TP usando los pips dinámicos configurados
                         if direction == "SELL":
-                            sl_price = crt_high + 1.5 * ltf_atr * pip_value
+                            sl_price = price + sl_pips * pip_value
+                            tp_price = price - tp_pips * pip_value
                             order_type = mt5.ORDER_TYPE_SELL
                         else:
-                            sl_price = crt_low - 1.5 * ltf_atr * pip_value
+                            sl_price = price - sl_pips * pip_value
+                            tp_price = price + tp_pips * pip_value
                             order_type = mt5.ORDER_TYPE_BUY
 
-                        volume = 0.1  # Lotaje controlado para cuentas de fondeo
+                        volume = lot  # Lotaje controlado desde el frontend
                         
                         request = {
                             "action": mt5.TRADE_ACTION_DEAL,
@@ -583,7 +641,7 @@ async def strategy_scanner_task():
                             "type": order_type,
                             "price": price,
                             "sl": sl_price,
-                            "tp": eq_tp,
+                            "tp": tp_price,
                             "deviation": 20,
                             "magic": 234000,
                             "comment": f"Auto {direction} Reversal",
@@ -595,7 +653,7 @@ async def strategy_scanner_task():
                         
                         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                             last_trade_time[symbol] = now_time
-                            msg = f"🚀 ¡Operación ejecutada automáticamente! {direction} {symbol} @ {price:.5f}. SL: {sl_price:.5f}, TP: {eq_tp:.5f}. Ticket: {result.order}"
+                            msg = f"🚀 ¡Operación ejecutada automáticamente! {direction} {symbol} @ {price:.5f}. SL: {sl_price:.5f}, TP: {tp_price:.5f}. Ticket: {result.order}"
                             logger.info(f"Escáner: {msg}")
                             await broadcast({
                                 "type": "scanner_signal",
@@ -605,7 +663,7 @@ async def strategy_scanner_task():
                                 "ticket": result.order,
                                 "price": price,
                                 "sl": sl_price,
-                                "tp": eq_tp,
+                                "tp": tp_price,
                                 "message": msg
                             })
                         else:
@@ -917,14 +975,15 @@ async def account_broadcaster():
 
 async def handler(websocket):
     """Manejador de conexiones WebSocket entrantes."""
-    global BOT_ACTIVE
+    global BOT_ACTIVE, ACTIVE_BOT_SYMBOLS
     logger.info(f"WS: Nuevo cliente conectado desde {websocket.remote_address}")
     CONNECTED_CLIENTS.add(websocket)
     
     # Enviar estado inicial
     await websocket.send(json.dumps({
         "type": "bot_status",
-        "active": BOT_ACTIVE
+        "active": BOT_ACTIVE,
+        "symbols": ACTIVE_BOT_SYMBOLS
     }))
     
     if MT5_INITIALIZED:
@@ -991,11 +1050,6 @@ async def handler(websocket):
                     tf_str = data.get("timeframe", "1m")
                     global active_timeframe
                     active_timeframe = tf_str
-                    
-                    # Forzar EURUSD por ahora según requerimiento
-                    if symbol != "EURUSD":
-                        logger.warning(f"WS: Petición de historial para {symbol} forzada a EURUSD.")
-                        symbol = "EURUSD"
                         
                     mt5_tf = TIMEFRAME_MAP.get(tf_str, mt5.TIMEFRAME_M1)
                     logger.info(f"WS: Solicitando historial de velas para {symbol} ({tf_str})")
@@ -1011,8 +1065,8 @@ async def handler(websocket):
                         continue
                     
                     broker_symbol = get_broker_symbol(symbol)
-                    # Obtener las últimas 10000 velas para dar máximo historial posible en web
-                    rates = mt5.copy_rates_from_pos(broker_symbol, mt5_tf, 0, 10000)
+                    # Obtener las últimas 1000 velas para evitar timeouts o fallos de caché en MT5
+                    rates = mt5.copy_rates_from_pos(broker_symbol, mt5_tf, 0, 1000)
                     
                     if rates is None or len(rates) == 0:
                         logger.error(f"MT5: Error al copiar rates para {broker_symbol}: {mt5.last_error()}")
@@ -1045,11 +1099,34 @@ async def handler(websocket):
                 
                 elif action == "toggle_bot":
                     BOT_ACTIVE = data.get("active", False)
-                    logger.info(f"WS: Bot Active status updated to: {BOT_ACTIVE}")
+                    ACTIVE_BOT_SYMBOLS = data.get("symbols", ["EURUSD", "GBPUSD"])
+                    logger.info(f"WS: Bot Active status updated to: {BOT_ACTIVE}, Symbols: {ACTIVE_BOT_SYMBOLS}")
                     await broadcast({
                         "type": "bot_status",
-                        "active": BOT_ACTIVE
+                        "active": BOT_ACTIVE,
+                        "symbols": ACTIVE_BOT_SYMBOLS
                     })
+                
+                elif action == "BOT_CONFIG_UPDATE" or data.get("type") == "BOT_CONFIG_UPDATE":
+                    payload = data.get("payload", {})
+                    with _config_lock:
+                        bot_config.strategy          = payload.get("strategy", bot_config.strategy)
+                        bot_config.lot_size          = float(payload.get("lotSize", bot_config.lot_size))
+                        bot_config.take_profit_pips  = int(payload.get("takeProfitPips", bot_config.take_profit_pips))
+                        bot_config.stop_loss_pips    = int(payload.get("stopLossPips", bot_config.stop_loss_pips))
+                        bot_config.max_positions     = int(payload.get("maxPositions", bot_config.max_positions))
+                        bot_config.max_daily_loss    = float(payload.get("maxDailyLoss", bot_config.max_daily_loss))
+                        bot_config.chroma_threshold  = float(payload.get("chromaThreshold", bot_config.chroma_threshold))
+                        bot_config.chroma_top_k      = int(payload.get("chromaTopK", bot_config.chroma_top_k))
+                        bot_config.killzones         = payload.get("killzones", bot_config.killzones)
+                        bot_config.trailing_stop     = bool(payload.get("trailingStop", bot_config.trailing_stop))
+                        bot_config.partial_close     = bool(payload.get("partialClose", bot_config.partial_close))
+                        bot_config.partial_close_pct = int(payload.get("partialClosePct", bot_config.partial_close_pct))
+                        bot_config.model_tbs_risk_multiplier = float(payload.get("modelTbsRiskMultiplier", bot_config.model_tbs_risk_multiplier))
+                        bot_config.model_tws_risk_multiplier = float(payload.get("modelTwsRiskMultiplier", bot_config.model_tws_risk_multiplier))
+                        bot_config.hybrid_m1_m15_confluence = bool(payload.get("hybridM1M15Confluence", bot_config.hybrid_m1_m15_confluence))
+                        bot_config.smt_divergence_check = bool(payload.get("smtDivergenceCheck", bot_config.smt_divergence_check))
+                    logger.info(f"[BRIDGE] Config actualizada → estrategia: {bot_config.strategy}, lote: {bot_config.lot_size}")
                 
                 elif action in ["buy", "sell"]:
                     symbol = data.get("symbol", "EURUSD")
@@ -1128,9 +1205,13 @@ async def handler(websocket):
                         continue
                         
                     # --- CAPA 2/3: VALIDACIÓN DE CONTEXTO DE MERCADO ---
+                    with _config_lock:
+                        threshold = bot_config.chroma_threshold
+                        top_k = bot_config.chroma_top_k
+
                     loop = asyncio.get_running_loop()
                     validation_res = await loop.run_in_executor(
-                        None, validate_market_context, setup_name, market_snapshot
+                        None, validate_market_context, setup_name, market_snapshot, threshold, top_k
                     )
                     
                     if not validation_res.get("approved", True):
