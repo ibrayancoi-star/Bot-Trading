@@ -4,8 +4,29 @@ import { useState, useEffect } from "react";
 import { useTradingStore, type BotConfig, type Strategy, type KillzoneName } from "@/lib/store/trading-store";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { Settings, Shield, Zap, Sparkles, Clock, Percent, X } from "lucide-react";
+import { Settings, Shield, Zap, Sparkles, Clock, Percent, X, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+function InfoBubble({ text }: { text: string }) {
+  return (
+    <div className="group relative inline-flex items-center cursor-help flex-shrink-0">
+      <Info className="h-3 w-3 text-zinc-600 group-hover:text-tv-blue transition-colors" />
+      <div className="
+        absolute hidden group-hover:flex flex-col
+        bottom-full left-1/2 -translate-x-1/2 mb-2
+        w-52 bg-zinc-900 border border-zinc-700
+        text-[11px] text-zinc-300 p-3
+        rounded-xl shadow-2xl z-[60]
+        normal-case font-normal leading-relaxed text-left
+        pointer-events-none
+      ">
+        <p>{text}</p>
+        <div className="absolute top-full left-1/2 -translate-x-1/2
+                        border-4 border-transparent border-t-zinc-700" />
+      </div>
+    </div>
+  );
+}
 
 export function LeftSidebar() {
   const isLeftSidebarOpen = useTradingStore((s) => s.isLeftSidebarOpen);
@@ -36,6 +57,22 @@ export function LeftSidebar() {
   const [hybridM1M15Confluence, setHybridM1M15Confluence] = useState<boolean>(true);
   const [smtDivergenceCheck, setSmtDivergenceCheck] = useState<boolean>(true);
 
+  // Killzones dinámicas
+  const [londonStart,  setLondonStart]  = useState<string>("07:00");
+  const [londonEnd,    setLondonEnd]    = useState<string>("10:00");
+  const [newYorkStart, setNewYorkStart] = useState<string>("12:00");
+  const [newYorkEnd,   setNewYorkEnd]   = useState<string>("15:00");
+  const [asianStart,   setAsianStart]   = useState<string>("02:00");
+  const [asianEnd,     setAsianEnd]     = useState<string>("05:00");
+
+  // Filtros con bypass
+  const [maxSpreadPoints,     setMaxSpreadPoints]     = useState<number>(20);
+  const [disableSpreadFilter, setDisableSpreadFilter] = useState<boolean>(false);
+  const [minAtrPips,          setMinAtrPips]          = useState<number>(12);
+  const [disableAtrFilter,    setDisableAtrFilter]    = useState<boolean>(false);
+  const [maxWickBodyRatio,    setMaxWickBodyRatio]     = useState<number>(20);
+  const [disableWickBodyFilter, setDisableWickBodyFilter] = useState<boolean>(false);
+
   // Dragging states
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -60,6 +97,20 @@ export function LeftSidebar() {
       if (botConfig.modelTwsRiskMultiplier !== undefined) setModelTwsRiskMultiplier(botConfig.modelTwsRiskMultiplier);
       if (botConfig.hybridM1M15Confluence !== undefined) setHybridM1M15Confluence(botConfig.hybridM1M15Confluence);
       if (botConfig.smtDivergenceCheck !== undefined) setSmtDivergenceCheck(botConfig.smtDivergenceCheck);
+
+      if (botConfig.londonStart  !== undefined) setLondonStart(botConfig.londonStart);
+      if (botConfig.londonEnd    !== undefined) setLondonEnd(botConfig.londonEnd);
+      if (botConfig.newYorkStart !== undefined) setNewYorkStart(botConfig.newYorkStart);
+      if (botConfig.newYorkEnd   !== undefined) setNewYorkEnd(botConfig.newYorkEnd);
+      if (botConfig.asianStart   !== undefined) setAsianStart(botConfig.asianStart);
+      if (botConfig.asianEnd     !== undefined) setAsianEnd(botConfig.asianEnd);
+
+      if (botConfig.maxSpreadPoints       !== undefined) setMaxSpreadPoints(botConfig.maxSpreadPoints);
+      if (botConfig.disableSpreadFilter   !== undefined) setDisableSpreadFilter(botConfig.disableSpreadFilter);
+      if (botConfig.minAtrPips            !== undefined) setMinAtrPips(botConfig.minAtrPips);
+      if (botConfig.disableAtrFilter      !== undefined) setDisableAtrFilter(botConfig.disableAtrFilter);
+      if (botConfig.maxWickBodyRatio      !== undefined) setMaxWickBodyRatio(botConfig.maxWickBodyRatio);
+      if (botConfig.disableWickBodyFilter !== undefined) setDisableWickBodyFilter(botConfig.disableWickBodyFilter);
     }
   }, [botConfig]);
 
@@ -124,6 +175,18 @@ export function LeftSidebar() {
       modelTwsRiskMultiplier,
       hybridM1M15Confluence,
       smtDivergenceCheck,
+      londonStart,
+      londonEnd,
+      newYorkStart,
+      newYorkEnd,
+      asianStart,
+      asianEnd,
+      maxSpreadPoints,
+      disableSpreadFilter,
+      minAtrPips,
+      disableAtrFilter,
+      maxWickBodyRatio,
+      disableWickBodyFilter,
     };
     setBotConfig(config);
     toggleLeftSidebar(); // Cierra tras aplicar la configuración
@@ -436,6 +499,170 @@ export function LeftSidebar() {
               className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
             />
           </div>
+        </div>
+
+        {/* ═══════════════════════════════════════════════════
+            SECCIÓN: CONTROL DE BYPASS Y MÁRGENES (CAPA 1)
+        ═══════════════════════════════════════════════════ */}
+        <div className="p-4 flex flex-col gap-4 border-t border-zinc-800">
+
+          {/* Cabecera de sección */}
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold text-tv-text-muted uppercase">
+            <Settings className="h-3.5 w-3.5 text-zinc-500" />
+            <span>Control de bypass y márgenes</span>
+          </div>
+
+          {/* ── Horarios de Killzones ─────────────────────── */}
+          <div className="flex flex-col gap-2">
+            <span className="text-[10px] text-zinc-500 uppercase tracking-wider">
+              Horarios de sesiones (UTC)
+            </span>
+
+            {/* Fila Londres */}
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 gap-3">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[11px] text-zinc-300 truncate">🇬🇧 Londres</span>
+                <InfoBubble text="Ventana de alta liquidez. Captura el barrido del rango asiático (Asia Sweep). Horario en UTC." />
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <input type="time" value={londonStart} onChange={(e) => setLondonStart(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+                <span className="text-zinc-600 text-[10px]">→</span>
+                <input type="time" value={londonEnd} onChange={(e) => setLondonEnd(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+              </div>
+            </div>
+
+            {/* Fila Nueva York */}
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 gap-3">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[11px] text-zinc-300 truncate">🇺🇸 Nueva York</span>
+                <InfoBubble text="Incluye el NY Magic Hour (10-11 AM EST) and el Judas Swing (9:30 AM). Mayor volumen del día. Horario en UTC." />
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <input type="time" value={newYorkStart} onChange={(e) => setNewYorkStart(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+                <span className="text-zinc-600 text-[10px]">→</span>
+                <input type="time" value={newYorkEnd} onChange={(e) => setNewYorkEnd(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+              </div>
+            </div>
+
+            {/* Fila Asiática */}
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 gap-3">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[11px] text-zinc-300 truncate">🌏 Asiática</span>
+                <InfoBubble text="Sesión de baja volatilidad. El rango formado aquí es el objetivo de barrido en la apertura de Londres." />
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <input type="time" value={asianStart} onChange={(e) => setAsianStart(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+                <span className="text-zinc-600 text-[10px]">→</span>
+                <input type="time" value={asianEnd} onChange={(e) => setAsianEnd(e.target.value)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1 border border-zinc-700 outline-none focus:border-tv-blue/60 w-[74px]" />
+              </div>
+            </div>
+          </div>
+
+          {/* ── Filtro de Spread ──────────────────────────── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-300">Spread máximo</span>
+                <InfoBubble text="El bot ignorará señales si el spread del broker supera este valor. Desactívalo para operar en cualquier condición de liquidez (útil en backtesting)." />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={1} max={100} step={1}
+                  value={maxSpreadPoints}
+                  disabled={disableSpreadFilter}
+                  onChange={(e) => setMaxSpreadPoints(parseInt(e.target.value) || 20)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1
+                             border border-zinc-700 outline-none focus:border-tv-blue/60 w-16 text-right
+                             disabled:opacity-30 disabled:cursor-not-allowed"
+                />
+                <span className="text-[10px] text-zinc-500">pts</span>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 px-1 cursor-pointer group">
+              <input
+                type="checkbox" checked={disableSpreadFilter}
+                onChange={(e) => setDisableSpreadFilter(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-800 accent-tv-blue"
+              />
+              <span className="text-[11px] text-zinc-400 group-hover:text-zinc-200 transition-colors">
+                Desactivar filtro de spread
+              </span>
+              <InfoBubble text="⚠ Riesgo: operar con spread alto puede erosionar el TP. Usar solo en demo o backtesting." />
+            </label>
+          </div>
+
+          {/* ── Filtro de ATR ─────────────────────────────── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-300">ATR mínimo</span>
+                <InfoBubble text="Average True Range mínimo en pips. Si la volatilidad de la vela ancla es inferior, el bot descarta la señal para evitar operar en mercado plano." />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={1} max={100} step={0.5}
+                  value={minAtrPips}
+                  disabled={disableAtrFilter}
+                  onChange={(e) => setMinAtrPips(parseFloat(e.target.value) || 12)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1
+                             border border-zinc-700 outline-none focus:border-tv-blue/60 w-16 text-right
+                             disabled:opacity-30 disabled:cursor-not-allowed"
+                />
+                <span className="text-[10px] text-zinc-500">pips</span>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 px-1 cursor-pointer group">
+              <input
+                type="checkbox" checked={disableAtrFilter}
+                onChange={(e) => setDisableAtrFilter(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-800 accent-tv-blue"
+              />
+              <span className="text-[11px] text-zinc-400 group-hover:text-zinc-200 transition-colors">
+                Desactivar filtro de ATR
+              </span>
+              <InfoBubble text="⚠ Solución directa al rechazo de señales. Desactívalo para observar las señales que el bot detecta sin restricción de volatilidad." />
+            </label>
+          </div>
+
+          {/* ── Filtro de Mecha CRT ───────────────────────── */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-300">Ratio cuerpo/mecha máx.</span>
+                <InfoBubble text="Regla CRT: la vela de manipulación (Vela 2) no debe tener un cuerpo mayor a este % del tamaño total. Un valor alto es más permisivo con los TBS." />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={5} max={100} step={5}
+                  value={maxWickBodyRatio}
+                  disabled={disableWickBodyFilter}
+                  onChange={(e) => setMaxWickBodyRatio(parseInt(e.target.value) || 20)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1
+                             border border-zinc-700 outline-none focus:border-tv-blue/60 w-16 text-right
+                             disabled:opacity-30 disabled:cursor-not-allowed"
+                />
+                <span className="text-[10px] text-zinc-500">%</span>
+              </div>
+            </div>
+            <label className="flex items-center gap-2 px-1 cursor-pointer group">
+              <input
+                type="checkbox" checked={disableWickBodyFilter}
+                onChange={(e) => setDisableWickBodyFilter(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-800 accent-tv-blue"
+              />
+              <span className="text-[11px] text-zinc-400 group-hover:text-zinc-200 transition-colors">
+                Desactivar filtro de mecha CRT
+              </span>
+              <InfoBubble text="Elimina la regla del 20% de la Metodología CRT. Útil para detectar setups TWS con cuerpo más amplio." />
+            </label>
+          </div>
+
         </div>
 
         {/* Botón de Aplicar */}

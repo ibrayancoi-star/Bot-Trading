@@ -1,6 +1,6 @@
 "use client";
 
-import { Code2, Zap, Link } from "lucide-react";
+import { Code2, Zap, Link, History } from "lucide-react";
 import { SymbolSelector } from "@/components/chart/SymbolSelector";
 import { TimeframeSelector } from "@/components/chart/TimeframeSelector";
 import { IndicatorMenu } from "@/components/chart/IndicatorMenu";
@@ -27,6 +27,11 @@ export function Header() {
         <TimeframeSelector />
         <Separator orientation="vertical" className="mx-1 h-6 bg-tv-border" />
         <IndicatorMenu />
+        <Separator orientation="vertical" className="mx-1 h-6 bg-tv-border" />
+        <button className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-tv-text hover:bg-tv-panel-hover active:scale-95 transition-transform duration-150 ease-in-out cursor-pointer">
+          <History className="h-3.5 w-3.5" />
+          <span>Backtesting</span>
+        </button>
       </div>
 
       <div className="flex items-center gap-4">

@@ -35,6 +35,22 @@ class BotConfig:
     hybrid_m1_m15_confluence: bool = True
     smt_divergence_check: bool = True
 
+    # [BYPASS CAPA 1] — Killzones dinámicas
+    london_start:   str   = "07:00"
+    london_end:     str   = "10:00"
+    new_york_start: str   = "12:00"
+    new_york_end:   str   = "15:00"
+    asian_start:    str   = "02:00"
+    asian_end:      str   = "05:00"
+
+    # [BYPASS CAPA 1] — Filtros con bypass
+    max_spread_points:      float = 20.0
+    disable_spread_filter:  bool  = False
+    min_atr_pips:           float = 12.0
+    disable_atr_filter:     bool  = False
+    max_wick_body_ratio:    float = 20.0
+    disable_wick_body_filter: bool = False
+
 # Variable global mutable (hilo-segura)
 _config_lock = threading.Lock()
 bot_config = BotConfig()
@@ -276,11 +292,19 @@ def validate_hard_rules(symbol: str, current_spread_points: float, range_size_pi
         # 1. Validar el Horario (Killzones o Nine AM Model Cycle)
         time_valid = False
         
+        # [BYPASS CAPA 1] — Horarios de Killzones dinámicas
+        with _config_lock:
+            time_windows = {}
+            kz = bot_config.killzones
+            if kz.get("london", False):
+                time_windows["london"]   = (bot_config.london_start,   bot_config.london_end)
+            if kz.get("newyork", False):
+                time_windows["newyork"]  = (bot_config.new_york_start, bot_config.new_york_end)
+            if kz.get("asian", False):
+                time_windows["asian"]    = (bot_config.asian_start,    bot_config.asian_end)
+                
         # Verificar Killzones
-        killzones = rules.get("killzones", {})
-        for kz_name, kz_range in killzones.items():
-            start = kz_range.get("start")
-            end = kz_range.get("end")
+        for kz_name, (start, end) in time_windows.items():
             if start and end and is_time_between(time_str, start, end):
                 time_valid = True
                 break
@@ -300,14 +324,66 @@ def validate_hard_rules(symbol: str, current_spread_points: float, range_size_pi
             return False, f"Horario restringido: hora actual ({time_str} en {tz_name}) fuera de killzones y ciclo Nine AM."
             
         # 2. Validar el Spread
-        # Convertir spread de puntos a pips (normalmente 1 pip = 10 puntos en Forex de 5 dígitos)
-        spread_pips = current_spread_points / 10.0
-        max_ratio = rules.get("spread_threshold", {}).get("max_spread_to_ltf_atr_ratio", 0.20)
-        max_allowed_spread = max_ratio * ltf_atr
+        # [BYPASS CAPA 1] — Spread
+        with _config_lock:
+            spread_bypass = bot_config.disable_spread_filter
+            spread_max    = bot_config.max_spread_points
+
+        if spread_bypass:
+            spread_ok = True
+        else:
+            spread_pips = current_spread_points / 10.0
+            max_ratio = rules.get("spread_threshold", {}).get("max_spread_to_ltf_atr_ratio", 0.20)
+            max_allowed_spread = max_ratio * ltf_atr
+            spread_ok = (spread_pips <= max_allowed_spread) and (current_spread_points <= spread_max)
         
-        if spread_pips > max_allowed_spread:
-            return False, f"Spread excedido: {spread_pips:.1f} pips (máx: {max_allowed_spread:.1f} pips, ratio: {max_ratio*100:.0f}% del ATR)."
+        if not spread_ok:
+            spread_pips = current_spread_points / 10.0
+            max_ratio = rules.get("spread_threshold", {}).get("max_spread_to_ltf_atr_ratio", 0.20)
+            max_allowed_spread = max_ratio * ltf_atr
+            if current_spread_points > spread_max:
+                return False, f"Spread excedido: {current_spread_points:.1f} puntos (máx: {spread_max:.1f} puntos)."
+            else:
+                return False, f"Spread excedido: {spread_pips:.1f} pips (máx: {max_allowed_spread:.1f} pips, ratio: {max_ratio*100:.0f}% del ATR)."
             
+        # [BYPASS CAPA 1] — ATR
+        with _config_lock:
+            atr_bypass = bot_config.disable_atr_filter
+            atr_min    = bot_config.min_atr_pips
+
+        if atr_bypass:
+            atr_ok = True
+        else:
+            atr_value = ltf_atr
+            atr_ok    = atr_value >= atr_min
+
+        if not atr_ok:
+            return False, f"ATR insuficiente: {ltf_atr:.1f} pips (mínimo: {atr_min:.1f} pips)."
+
+        # [BYPASS CAPA 1] — Ratio mecha CRT
+        with _config_lock:
+            wick_bypass    = bot_config.disable_wick_body_filter
+            wick_max_ratio = bot_config.max_wick_body_ratio / 100.0  # convertir % a decimal
+
+        if wick_bypass:
+            wick_ok = True
+        else:
+            # Obtener la última vela M1 para validar el ratio cuerpo/mecha
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
+            if rates is not None and len(rates) > 0:
+                candle = rates[0]
+                candle_range = float(candle['high'] - candle['low'])
+                body_size = abs(float(candle['close'] - candle['open']))
+                if candle_range > 0:
+                    wick_ok = body_size <= (candle_range * wick_max_ratio)
+                else:
+                    wick_ok = True
+            else:
+                wick_ok = True
+
+        if not wick_ok:
+            return False, f"Filtro Mecha CRT: el cuerpo de la vela supera el límite configurado del rango total."
+
         # 3. Validar Dimensión
         dim_rules = rules.get("dimension_restrictions", {})
         symbol_upper = symbol.upper()
@@ -460,16 +536,37 @@ def is_in_active_killzone() -> bool:
     now_utc = datetime.datetime.now(datetime.timezone.utc).hour * 60 + datetime.datetime.now(datetime.timezone.utc).minute
     with _config_lock:
         kz = bot_config.killzones
+        london_start = bot_config.london_start
+        london_end = bot_config.london_end
+        new_york_start = bot_config.new_york_start
+        new_york_end = bot_config.new_york_end
+        asian_start = bot_config.asian_start
+        asian_end = bot_config.asian_end
 
-    windows = {
-        "asian":   (2*60,   5*60),   # 02:00–05:00 UTC
-        "london":  (7*60,  10*60),   # 07:00–10:00 UTC
-        "overlap": (12*60, 15*60),   # 12:00–15:00 UTC
-        "newyork": (13*60, 16*60),   # 13:00–16:00 UTC
-    }
+    def parse_t(t_str):
+        try:
+            h, m = map(int, t_str.split(":"))
+            return h * 60 + m
+        except Exception:
+            return 0
+
+    windows = {}
+    if kz.get("london", False):
+        windows["london"] = (parse_t(london_start), parse_t(london_end))
+    if kz.get("newyork", False):
+        windows["newyork"] = (parse_t(new_york_start), parse_t(new_york_end))
+    if kz.get("asian", False):
+        windows["asian"] = (parse_t(asian_start), parse_t(asian_end))
+    if kz.get("overlap", False):
+        windows["overlap"] = (12*60, 15*60)
+
     for name, (start, end) in windows.items():
-        if kz.get(name) and start <= now_utc <= end:
-            return True
+        if start <= end:
+            if start <= now_utc <= end:
+                return True
+        else:
+            if now_utc >= start or now_utc <= end:
+                return True
     return False
 
 async def strategy_scanner_task():
@@ -1126,7 +1223,23 @@ async def handler(websocket):
                         bot_config.model_tws_risk_multiplier = float(payload.get("modelTwsRiskMultiplier", bot_config.model_tws_risk_multiplier))
                         bot_config.hybrid_m1_m15_confluence = bool(payload.get("hybridM1M15Confluence", bot_config.hybrid_m1_m15_confluence))
                         bot_config.smt_divergence_check = bool(payload.get("smtDivergenceCheck", bot_config.smt_divergence_check))
-                    logger.info(f"[BRIDGE] Config actualizada → estrategia: {bot_config.strategy}, lote: {bot_config.lot_size}")
+
+                        # [BYPASS CAPA 1] — Killzones dinámicas
+                        bot_config.london_start   = payload.get("londonStart",   bot_config.london_start)
+                        bot_config.london_end     = payload.get("londonEnd",     bot_config.london_end)
+                        bot_config.new_york_start = payload.get("newYorkStart",  bot_config.new_york_start)
+                        bot_config.new_york_end   = payload.get("newYorkEnd",    bot_config.new_york_end)
+                        bot_config.asian_start    = payload.get("asianStart",    bot_config.asian_start)
+                        bot_config.asian_end      = payload.get("asianEnd",      bot_config.asian_end)
+
+                        # [BYPASS CAPA 1] — Filtros con bypass
+                        bot_config.max_spread_points       = float(payload.get("maxSpreadPoints",       bot_config.max_spread_points))
+                        bot_config.disable_spread_filter   = bool(payload.get("disableSpreadFilter",    bot_config.disable_spread_filter))
+                        bot_config.min_atr_pips            = float(payload.get("minAtrPips",            bot_config.min_atr_pips))
+                        bot_config.disable_atr_filter      = bool(payload.get("disableAtrFilter",       bot_config.disable_atr_filter))
+                        bot_config.max_wick_body_ratio     = float(payload.get("maxWickBodyRatio",      bot_config.max_wick_body_ratio))
+                        bot_config.disable_wick_body_filter = bool(payload.get("disableWickBodyFilter", bot_config.disable_wick_body_filter))
+                    logger.info(f"[BRIDGE] Config actualizada → estrategia: {bot_config.strategy}, lote: {bot_config.lot_size}, disable_atr_filter: {bot_config.disable_atr_filter}")
                 
                 elif action in ["buy", "sell"]:
                     symbol = data.get("symbol", "EURUSD")

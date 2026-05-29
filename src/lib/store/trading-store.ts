@@ -71,6 +71,25 @@ export interface BotConfig {
   modelTwsRiskMultiplier: number;
   hybridM1M15Confluence: boolean;
   smtDivergenceCheck: boolean;
+
+  // ── Killzones dinámicas ─────────────────────────────
+  londonStart:   string;   // "07:00" (UTC)
+  londonEnd:     string;   // "10:00" (UTC)
+  newYorkStart:  string;   // "12:00" (UTC)
+  newYorkEnd:    string;   // "15:00" (UTC)
+  asianStart:    string;   // "02:00" (UTC)
+  asianEnd:      string;   // "05:00" (UTC)
+
+  // ── Filtros con bypass ──────────────────────────────
+  maxSpreadPoints:    number;   // Spread máximo en puntos
+  disableSpreadFilter: boolean; // true = ignorar el filtro de spread
+
+  minAtrPips:         number;   // ATR mínimo requerido en pips
+  disableAtrFilter:   boolean;  // true = ignorar el filtro de ATR
+
+  // ── Bypass de validación de mecha CRT ──────────────
+  maxWickBodyRatio:         number;   // % máx del cuerpo sobre la vela (defecto: 20)
+  disableWickBodyFilter:    boolean;  // true = ignorar la regla del 20%
 }
 
 interface TradingState {
@@ -165,6 +184,22 @@ export const useTradingStore = create<TradingState>()(
         modelTwsRiskMultiplier: 0.5,
         hybridM1M15Confluence: true,
         smtDivergenceCheck: true,
+
+        londonStart:   "07:00",
+        londonEnd:     "10:00",
+        newYorkStart:  "12:00",
+        newYorkEnd:    "15:00",
+        asianStart:    "02:00",
+        asianEnd:      "05:00",
+
+        maxSpreadPoints:       20,
+        disableSpreadFilter:   false,
+
+        minAtrPips:            12,
+        disableAtrFilter:      false,
+
+        maxWickBodyRatio:      20,
+        disableWickBodyFilter: false,
       },
       isLeftSidebarOpen: false,
 

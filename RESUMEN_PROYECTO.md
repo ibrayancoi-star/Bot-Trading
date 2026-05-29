@@ -21,10 +21,11 @@ El proyecto consiste en la creación de una plataforma de trading avanzada (tipo
 - **Resolución de Bucles de Eco y Conexión (HMR Safe):** Se corrigió la fuga de conexiones WebSocket y la duplicidad de suscriptores Zustand generadas por los refrescos en caliente (Ctrl + F5 y recarga del servidor de Python) y se implementó una cláusula de guarda estricta para evitar la oscilación y bucles infinitos de encendido/apagado.
 
 ### Qué no funciona:
-- **Rechazo de Señales por ATR:** Actualmente, el bot en todo momento rechaza las señales detectadas escudándose en las condiciones de validación del ATR.
+- Por el momento no hay fallos críticos detectados. El rechazo constante por ATR ya ha sido solucionado mediante el sistema de Bypass dinámico.
 
 ### Qué falta:
-- **Flexibilidad Completa de Parámetros:** Ajustar el motor de reglas en el backend para que la totalidad de los parámetros enviados desde el frontend (incluyendo los de la metodología CRT) sean respetados, dando total flexibilidad al usuario y evitando rechazos estrictos indeseados.
+- **Funcionalidad Real de Backtesting:** El botón visual de Backtesting ya está en la interfaz, falta conectar su lógica al backend para simular datos históricos.
+- **Expansión de Parámetros Restantes:** Continuar implementando más flexibilidades al algoritmo si se requiere.
 
 ---
 
@@ -46,7 +47,7 @@ El proyecto consiste en la creación de una plataforma de trading avanzada (tipo
 
 ## 🎯 Próximo Paso Exacto
 
-1. **Poder Ajustar los Parámetros en su Totalidad / Lógica del ATR:** Revisar la lógica dura de validación en Python (`validate_hard_rules` y cálculos de ATR) para permitir jugar con la flexibilidad del bot. La idea es que los parámetros dictados por el usuario desde el modal reemplacen o flexibilicen las restricciones estrictas que causan el rechazo constante de operaciones.
+1. **Desarrollo del Motor de Backtesting:** Ahora que el botón de Backtesting existe en la interfaz, el siguiente paso lógico es crear el puente hacia el historial de MT5 para ejecutar simulaciones visuales.
 
 ---
 
@@ -146,3 +147,5 @@ export function LeftSidebar() {
 * Integración ChromaDB y modelos NLP.
 * Motor de gráficos asíncronos Lightweight Charts.
 * Escáner Autónomo y Risk Guard System.
+* Sistema de Bypass dinámico (Capa 1) para flexibilizar las reglas de ATR y Killzones desde el frontend.
+* Botón visual animado de Backtesting en la cabecera.
