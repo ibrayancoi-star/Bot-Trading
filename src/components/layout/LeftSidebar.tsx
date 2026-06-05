@@ -73,6 +73,11 @@ export function LeftSidebar() {
   const [maxWickBodyRatio,    setMaxWickBodyRatio]     = useState<number>(20);
   const [disableWickBodyFilter, setDisableWickBodyFilter] = useState<boolean>(false);
 
+  // [BYPASS DIMENSIÓN]
+  const [disableDimensionFilter,    setDisableDimensionFilter]    = useState<boolean>(false);
+  const [minAmplitudeForexPct,      setMinAmplitudeForexPct]      = useState<number>(0.08);
+  const [minAmplitudeIndicesPoints, setMinAmplitudeIndicesPoints] = useState<number>(20.0);
+
   // Dragging states
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -111,6 +116,11 @@ export function LeftSidebar() {
       if (botConfig.disableAtrFilter      !== undefined) setDisableAtrFilter(botConfig.disableAtrFilter);
       if (botConfig.maxWickBodyRatio      !== undefined) setMaxWickBodyRatio(botConfig.maxWickBodyRatio);
       if (botConfig.disableWickBodyFilter !== undefined) setDisableWickBodyFilter(botConfig.disableWickBodyFilter);
+
+      // [BYPASS DIMENSIÓN]
+      if (botConfig.disableDimensionFilter    !== undefined) setDisableDimensionFilter(botConfig.disableDimensionFilter);
+      if (botConfig.minAmplitudeForexPct      !== undefined) setMinAmplitudeForexPct(botConfig.minAmplitudeForexPct);
+      if (botConfig.minAmplitudeIndicesPoints !== undefined) setMinAmplitudeIndicesPoints(botConfig.minAmplitudeIndicesPoints);
     }
   }, [botConfig]);
 
@@ -187,6 +197,10 @@ export function LeftSidebar() {
       disableAtrFilter,
       maxWickBodyRatio,
       disableWickBodyFilter,
+      // [BYPASS DIMENSIÓN]
+      disableDimensionFilter,
+      minAmplitudeForexPct,
+      minAmplitudeIndicesPoints,
     };
     setBotConfig(config);
     toggleLeftSidebar(); // Cierra tras aplicar la configuración
@@ -244,7 +258,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[10px] text-tv-text-muted">Estrategia Activa</label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-[10px] text-tv-text-muted">Estrategia Activa</label>
+              <InfoBubble text="Selecciona el estilo de trading y temporalidad objetivo para el bot." />
+            </div>
             <select
               value={strategy}
               onChange={(e) => setStrategy(e.target.value as Strategy)}
@@ -258,7 +275,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
-            <span className="text-[11px] text-tv-text-muted">Lotaje Base</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Lotaje Base</span>
+              <InfoBubble text="Volumen de cada operación (en lotes)." />
+            </div>
             <input
               type="number"
               step="0.01"
@@ -281,7 +301,10 @@ export function LeftSidebar() {
 
           <div className="grid grid-cols-2 gap-2">
             <div className="flex flex-col gap-1 bg-tv-bg border border-zinc-800 rounded-md p-2">
-              <span className="text-[9px] text-tv-text-muted">Take Profit (Pips)</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-tv-text-muted">Take Profit (Pips)</span>
+                <InfoBubble text="Distancia en pips para asegurar ganancias." />
+              </div>
               <input
                 type="number"
                 min="1"
@@ -291,7 +314,10 @@ export function LeftSidebar() {
               />
             </div>
             <div className="flex flex-col gap-1 bg-tv-bg border border-zinc-800 rounded-md p-2">
-              <span className="text-[9px] text-tv-text-muted">Stop Loss (Pips)</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-tv-text-muted">Stop Loss (Pips)</span>
+                <InfoBubble text="Distancia máxima en pips para asumir pérdidas." />
+              </div>
               <input
                 type="number"
                 min="1"
@@ -303,7 +329,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
-            <span className="text-[11px] text-tv-text-muted">Posiciones Máximas</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Posiciones Máximas</span>
+              <InfoBubble text="Límite de posiciones simultáneas que el bot puede mantener abiertas." />
+            </div>
             <input
               type="number"
               min="1"
@@ -314,7 +343,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
-            <span className="text-[11px] text-tv-text-muted">Pérdida Diaria Máx (%)</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Pérdida Diaria Máx (%)</span>
+              <InfoBubble text="Si la pérdida flotante alcanza este porcentaje del balance, el bot detendrá operaciones y cerrará todas las posiciones de emergencia (Risk Guard)." />
+            </div>
             <input
               type="number"
               step="0.1"
@@ -337,7 +369,10 @@ export function LeftSidebar() {
 
           <div className="flex flex-col gap-1 bg-tv-bg border border-zinc-800 rounded-md p-2">
             <div className="flex justify-between items-center">
-              <span className="text-[9px] text-tv-text-muted font-medium">Umbral Similitud (Chroma)</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-tv-text-muted font-medium">Umbral Similitud (Chroma)</span>
+                <InfoBubble text="Distancia máxima para encontrar escenarios pasados similares. Menor valor requiere mayor similitud (más restrictivo)." />
+              </div>
               <span className="text-[9px] font-mono text-tv-green">{chromaThreshold.toFixed(2)}</span>
             </div>
             <input
@@ -352,7 +387,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
-            <span className="text-[11px] text-tv-text-muted">Top-K Similitudes</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Top-K Similitudes</span>
+              <InfoBubble text="Número de situaciones históricas similares a considerar antes de abrir un trade." />
+            </div>
             <input
               type="number"
               min="1"
@@ -371,6 +409,7 @@ export function LeftSidebar() {
           <div className="flex items-center gap-1.5 text-[10px] font-semibold text-tv-text-muted uppercase">
             <Clock className="h-3.5 w-3.5 text-tv-amber" />
             <span>Killzones Operativas (UTC)</span>
+            <InfoBubble text="El bot solo buscará operaciones durante las sesiones de mercado habilitadas." />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -401,7 +440,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex items-center justify-between">
-            <span className="text-[11px] text-tv-text-muted">Trailing Stop</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Trailing Stop</span>
+              <InfoBubble text="Mover automáticamente el Stop Loss conforme el precio avanza a favor." />
+            </div>
             <input
               type="checkbox"
               checked={trailingStop}
@@ -411,7 +453,10 @@ export function LeftSidebar() {
           </div>
 
           <div className="flex items-center justify-between">
-            <span className="text-[11px] text-tv-text-muted">Cierre Parcial</span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-tv-text-muted">Cierre Parcial</span>
+              <InfoBubble text="Cerrar una parte de la posición al alcanzar el punto de equilibrio (EQ) y asegurar a Breakeven." />
+            </div>
             <input
               type="checkbox"
               checked={partialClose}
@@ -422,7 +467,10 @@ export function LeftSidebar() {
 
           {partialClose && (
             <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
-              <span className="text-[11px] text-tv-text-muted">Volumen Parcial (%)</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-tv-text-muted">Volumen Parcial (%)</span>
+                <InfoBubble text="Porcentaje de la posición original que se cerrará en el TP intermedio." />
+              </div>
               <input
                 type="number"
                 min="10"
@@ -447,6 +495,7 @@ export function LeftSidebar() {
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
             <div className="flex items-center">
               <span className="text-[11px] text-tv-text-muted">Multiplicador TBS</span>
+              <InfoBubble text="Multiplicador de riesgo para el setup Turtle Body Soup (cierre de cuerpo + reversión). 1.0 = Riesgo completo." />
               <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.modelTbsRiskMultiplier ?? 1.0})</span>
             </div>
             <input
@@ -462,6 +511,7 @@ export function LeftSidebar() {
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
             <div className="flex items-center">
               <span className="text-[11px] text-tv-text-muted">Multiplicador TWS</span>
+              <InfoBubble text="Multiplicador de riesgo para el setup Turtle Wick Soup (solo mecha). Menos fiable, por defecto 0.5 = Mitad de riesgo." />
               <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.modelTwsRiskMultiplier ?? 0.5})</span>
             </div>
             <input
@@ -477,6 +527,7 @@ export function LeftSidebar() {
           <div className="flex items-center justify-between">
             <div className="flex items-center">
               <span className="text-[11px] text-tv-text-muted">Confluencia Híbrida M1/M15</span>
+              <InfoBubble text="Si está activo, exige que el barrido en M1 coincida con una zona clave de liquidez en M15 para mayor fiabilidad." />
               <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.hybridM1M15Confluence ? "SÍ" : "NO"})</span>
             </div>
             <input
@@ -490,6 +541,7 @@ export function LeftSidebar() {
           <div className="flex items-center justify-between">
             <div className="flex items-center">
               <span className="text-[11px] text-tv-text-muted">Filtro Divergencia SMT</span>
+              <InfoBubble text="Si está activo, evita pares que sí barrieron un extremo si su par correlacionado inverso (e.g. DXY) no confirmó el movimiento." />
               <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.smtDivergenceCheck ? "SÍ" : "NO"})</span>
             </div>
             <input
@@ -661,6 +713,69 @@ export function LeftSidebar() {
               </span>
               <InfoBubble text="Elimina la regla del 20% de la Metodología CRT. Útil para detectar setups TWS con cuerpo más amplio." />
             </label>
+          </div>
+
+          {/* [BYPASS DIMENSIÓN] — Filtro de dimensión de vela ancla H4 */}
+          <div className="flex flex-col gap-2">
+
+            {/* Input: Amplitud mínima Forex */}
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800
+                            rounded-lg px-3 py-2 opacity-100"
+                 style={{ opacity: disableDimensionFilter ? 0.4 : 1 }}>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-300">Amplitud mínima Forex</span>
+                <InfoBubble text="Tamaño mínimo de la vela ancla H4 en porcentaje del precio para pares de divisas (EURUSD, GBPUSD). Si la vela H4 es más pequeña que este valor, se descarta la señal. Valor típico: 0.08%." />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={0.01} max={1.0} step={0.01}
+                  value={minAmplitudeForexPct}
+                  disabled={disableDimensionFilter}
+                  onChange={(e) => setMinAmplitudeForexPct(parseFloat(e.target.value) || 0.08)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1
+                             border border-zinc-700 outline-none focus:border-tv-blue/60 w-16 text-right
+                             disabled:opacity-30 disabled:cursor-not-allowed"
+                />
+                <span className="text-[10px] text-zinc-500">%</span>
+              </div>
+            </div>
+
+            {/* Input: Amplitud mínima Índices */}
+            <div className="flex items-center justify-between bg-zinc-900 border border-zinc-800
+                            rounded-lg px-3 py-2"
+                 style={{ opacity: disableDimensionFilter ? 0.4 : 1 }}>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-zinc-300">Amplitud mínima Índices</span>
+                <InfoBubble text="Tamaño mínimo de la vela ancla H4 en puntos para índices bursátiles. Si la vela H4 es más pequeña que este valor, se descarta la señal. Valor típico: 20 puntos." />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={1} max={500} step={1}
+                  value={minAmplitudeIndicesPoints}
+                  disabled={disableDimensionFilter}
+                  onChange={(e) => setMinAmplitudeIndicesPoints(parseFloat(e.target.value) || 20.0)}
+                  className="bg-zinc-800 text-zinc-300 text-[11px] font-mono rounded px-2 py-1
+                             border border-zinc-700 outline-none focus:border-tv-blue/60 w-16 text-right
+                             disabled:opacity-30 disabled:cursor-not-allowed"
+                />
+                <span className="text-[10px] text-zinc-500">pts</span>
+              </div>
+            </div>
+
+            {/* Toggle: Desactivar filtro completo */}
+            <label className="flex items-center gap-2 px-1 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={disableDimensionFilter}
+                onChange={(e) => setDisableDimensionFilter(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-800 accent-tv-blue"
+              />
+              <span className="text-[11px] text-zinc-400 group-hover:text-zinc-200 transition-colors">
+                Desactivar filtro de dimensión
+              </span>
+              <InfoBubble text="Elimina la validación del tamaño mínimo de la vela H4. Útil en mercados lentos o en consolidación donde las velas son pequeñas pero el setup CRT es válido. Los inputs de amplitud se ignorarán." />
+            </label>
+
           </div>
 
         </div>

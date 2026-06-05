@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from typing import Dict
 import threading
 
+_backtest_running = False
+
+
 @dataclass
 class BotConfig:
     strategy: str = "scalping"
@@ -50,6 +53,11 @@ class BotConfig:
     disable_atr_filter:     bool  = False
     max_wick_body_ratio:    float = 20.0
     disable_wick_body_filter: bool = False
+
+    # [BYPASS DIMENSIÓN]
+    disable_dimension_filter:       bool  = False
+    min_amplitude_forex_pct:        float = 0.08
+    min_amplitude_indices_points:   float = 20.0
 
 # Variable global mutable (hilo-segura)
 _config_lock = threading.Lock()
@@ -385,33 +393,41 @@ def validate_hard_rules(symbol: str, current_spread_points: float, range_size_pi
             return False, f"Filtro Mecha CRT: el cuerpo de la vela supera el límite configurado del rango total."
 
         # 3. Validar Dimensión
-        dim_rules = rules.get("dimension_restrictions", {})
-        symbol_upper = symbol.upper()
-        
-        # Clasificar Forex vs Indices
-        is_forex = any(f_sym in symbol_upper for f_sym in [
-            "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD",
-            "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"
-        ])
-        
-        if is_forex:
-            min_amp_pct = dim_rules.get("min_amplitude_forex_pct", 0.08)
-            # Consultar precio actual en MT5 para calcular porcentaje
-            tick = mt5.symbol_info_tick(symbol)
-            price = tick.bid if tick else 1.08  # fallback
-            
-            # Convertir range_size_pips a diferencia de precio
-            pip_value = 0.01 if "JPY" in symbol_upper else 0.0001
-            range_price_diff = range_size_pips * pip_value
-            amplitude_pct = (range_price_diff / price) * 100.0
-            
-            if amplitude_pct < min_amp_pct:
-                return False, f"Dimensión insuficiente en Forex: {amplitude_pct:.3f}% (mínimo: {min_amp_pct}%)."
+        # [BYPASS DIMENSIÓN] — leer config dinámica en un solo bloque
+        with _config_lock:
+            dim_bypass    = bot_config.disable_dimension_filter
+            min_amp_forex = bot_config.min_amplitude_forex_pct
+            min_amp_idx   = bot_config.min_amplitude_indices_points
+
+        # Aplicar bypass o validación dinámica
+        if dim_bypass:
+            # [BYPASS DIMENSIÓN] usuario desactivó el filtro — pasar directamente
+            pass
         else:
-            min_points = dim_rules.get("min_amplitude_indices_points", 20.0)
-            if range_size_pips < min_points:
-                return False, f"Dimensión insuficiente en Índices: {range_size_pips:.1f} puntos (mínimo: {min_points} puntos)."
+            symbol_upper = symbol.upper()
+            
+            # Clasificar Forex vs Indices
+            is_forex = any(f_sym in symbol_upper for f_sym in [
+                "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD",
+                "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"
+            ])
+            
+            if is_forex:
+                # Consultar precio actual en MT5 para calcular porcentaje
+                tick = mt5.symbol_info_tick(symbol)
+                price = tick.bid if tick else 1.08  # fallback
                 
+                # Convertir range_size_pips a diferencia de precio
+                pip_value = 0.01 if "JPY" in symbol_upper else 0.0001
+                range_price_diff = range_size_pips * pip_value
+                amplitude_pct = (range_price_diff / price) * 100.0
+                
+                if amplitude_pct < min_amp_forex:
+                    return False, f"Dimensión insuficiente en Forex: {amplitude_pct:.3f}% (mínimo: {min_amp_forex}%)."
+            else:
+                if range_size_pips < min_amp_idx:
+                    return False, f"Dimensión insuficiente en Índices: {range_size_pips:.1f} puntos (mínimo: {min_amp_idx} puntos)."
+                    
         return True, ""
     except Exception as e:
         logger.error(f"Error en validación de hard rules: {e}")
@@ -588,6 +604,9 @@ async def strategy_scanner_task():
     update_reference_ranges()
 
     while True:
+        if _backtest_running:
+            await asyncio.sleep(1)
+            continue
         if MT5_INITIALIZED and not RISK_GUARD_TRIGGERED:
             try:
                 # Actualizar rangos periódicamente
@@ -1070,6 +1089,43 @@ async def account_broadcaster():
                 await broadcast(data)
         await asyncio.sleep(1.0)
 
+async def run_backtest(params, websocket):
+    global _backtest_running
+    _backtest_running = True
+    try:
+        symbol = params.get("symbol", "EURUSD")
+        timeframe = params.get("timeframe", "1m")
+        from_date_str = params.get("from")
+        to_date_str = params.get("to")
+        config = params.get("config", {})
+        
+        # Convert dates
+        date_from = datetime.datetime.strptime(from_date_str, "%Y-%m-%d")
+        date_to = datetime.datetime.strptime(to_date_str, "%Y-%m-%d")
+        
+        from backtesting_engine import DataLayer, SimEngine
+        
+        # Preflight Check
+        df = DataLayer.get_historical_data(symbol, timeframe, date_from, date_to)
+        h4_from = date_from - datetime.timedelta(days=5)
+        h4_df = DataLayer.get_historical_data(symbol, "4h", h4_from, date_to)
+        
+        async def ws_send_fn(msg):
+            await send_to_client(websocket, msg)
+            
+        def is_running_check_fn():
+            return _backtest_running
+            
+        await SimEngine.run(df, h4_df, symbol, config, ws_send_fn, is_running_check_fn)
+    except Exception as e:
+        logger.exception("Error en backtest")
+        await send_to_client(websocket, {
+            "type": "backtest_error",
+            "message": str(e)
+        })
+    finally:
+        _backtest_running = False
+
 async def handler(websocket):
     """Manejador de conexiones WebSocket entrantes."""
     global BOT_ACTIVE, ACTIVE_BOT_SYMBOLS
@@ -1137,6 +1193,11 @@ async def handler(websocket):
             try:
                 data = json.loads(message)
                 logger.info(f"WS: Mensaje recibido del cliente: {data}")
+                
+                if data.get("type") == "backtest_start":
+                    asyncio.create_task(run_backtest(data.get("params", {}), websocket))
+                elif data.get("type") == "backtest_stop":
+                    _backtest_running = False
                 
                 action = data.get("action")
                 if action == "ping":
@@ -1239,6 +1300,11 @@ async def handler(websocket):
                         bot_config.disable_atr_filter      = bool(payload.get("disableAtrFilter",       bot_config.disable_atr_filter))
                         bot_config.max_wick_body_ratio     = float(payload.get("maxWickBodyRatio",      bot_config.max_wick_body_ratio))
                         bot_config.disable_wick_body_filter = bool(payload.get("disableWickBodyFilter", bot_config.disable_wick_body_filter))
+
+                        # [BYPASS DIMENSIÓN]
+                        bot_config.disable_dimension_filter     = bool(payload.get("disableDimensionFilter",    bot_config.disable_dimension_filter))
+                        bot_config.min_amplitude_forex_pct      = float(payload.get("minAmplitudeForexPct",     bot_config.min_amplitude_forex_pct))
+                        bot_config.min_amplitude_indices_points = float(payload.get("minAmplitudeIndicesPoints",bot_config.min_amplitude_indices_points))
                     logger.info(f"[BRIDGE] Config actualizada → estrategia: {bot_config.strategy}, lote: {bot_config.lot_size}, disable_atr_filter: {bot_config.disable_atr_filter}")
                 
                 elif action in ["buy", "sell"]:

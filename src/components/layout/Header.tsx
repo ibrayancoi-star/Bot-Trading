@@ -6,9 +6,11 @@ import { TimeframeSelector } from "@/components/chart/TimeframeSelector";
 import { IndicatorMenu } from "@/components/chart/IndicatorMenu";
 import { Separator } from "@/components/ui/separator";
 import { useTradingStore } from "@/lib/store/trading-store";
+import { useModeStore } from "@/lib/store/mode-store";
 
 export function Header() {
   const connection = useTradingStore((s) => s.connection);
+  const { mode, setMode } = useModeStore();
 
   return (
     <header className="flex h-12 items-center justify-between border-b border-tv-border bg-tv-panel px-3">
@@ -28,10 +30,28 @@ export function Header() {
         <Separator orientation="vertical" className="mx-1 h-6 bg-tv-border" />
         <IndicatorMenu />
         <Separator orientation="vertical" className="mx-1 h-6 bg-tv-border" />
-        <button className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-tv-text hover:bg-tv-panel-hover active:scale-95 transition-transform duration-150 ease-in-out cursor-pointer">
-          <History className="h-3.5 w-3.5" />
-          <span>Backtesting</span>
-        </button>
+        <div className="flex items-center gap-1 rounded bg-tv-bg/50 p-0.5 border border-tv-border">
+          {(["DEMO", "BACKTEST", "LIVE"] as const).map((m) => {
+            const isActive = mode === m;
+            return (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`px-2.5 py-1 rounded-sm text-[10px] font-bold uppercase transition-colors active:scale-95 cursor-pointer ${
+                  isActive
+                    ? m === "LIVE"
+                      ? "bg-rose-600 text-white"
+                      : m === "BACKTEST"
+                      ? "bg-purple-600 text-white"
+                      : "bg-tv-blue text-white"
+                    : "text-tv-text-dim hover:text-tv-text hover:bg-tv-panel-hover"
+                }`}
+              >
+                {m}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex items-center gap-4">

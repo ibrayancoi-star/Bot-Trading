@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { PositionsTable } from "@/components/dashboard/PositionsTable";
-import { HistoryPanel } from "@/components/dashboard/HistoryPanel";
+import { PositionsTable } from "@/components/positions/PositionsTable";
+import { HistoryTable } from "@/components/history/HistoryTable";
 import { useTradingStore } from "@/lib/store/trading-store";
 import { cn } from "@/lib/utils";
 
@@ -10,11 +10,11 @@ type TabId = "positions" | "history";
 
 export function BottomPanel() {
   const [activeTab, setActiveTab] = useState<TabId>("positions");
-  const { positions, historicalTrades } = useTradingStore();
+  const { positions, tradeHistory } = useTradingStore();
 
   const tabs: { id: TabId; label: string; count?: number }[] = [
-    { id: "positions", label: "Posiciones", count: positions.length },
-    { id: "history", label: "Historial", count: historicalTrades.length },
+    { id: "positions", label: "Posiciones", count: positions?.length || 0 },
+    { id: "history", label: "Historial", count: tradeHistory?.length || 0 },
   ];
 
   return (
@@ -59,9 +59,9 @@ export function BottomPanel() {
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden bg-zinc-950">
         {activeTab === "positions" && <PositionsTable />}
-        {activeTab === "history" && <HistoryPanel />}
+        {activeTab === "history" && <HistoryTable />}
       </div>
     </div>
   );

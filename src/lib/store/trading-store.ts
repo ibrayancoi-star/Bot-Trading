@@ -5,6 +5,26 @@ import { persist } from "zustand/middleware";
 import { TradeResult, TTPChallenge, BrokerConnection } from "../types/trading";
 import { HistoricalTrade } from "../types/market";
 
+// [POSITIONS MODULE]
+export interface Position {
+  ticket:        number;
+  symbol:        string;
+  type:          "buy" | "sell";
+  volume:        number;
+  open_price:    number;
+  current_price: number;
+  sl:            number;
+  tp:            number;
+  profit:        number;
+  time:          number;
+}
+
+export interface ClosedTrade extends Position {
+  close_price: number;
+  close_time:  number;
+  pnl:         number;
+}
+
 export interface PropAccount {
   balance: number;
   equity: number;
@@ -90,13 +110,18 @@ export interface BotConfig {
   // ── Bypass de validación de mecha CRT ──────────────
   maxWickBodyRatio:         number;   // % máx del cuerpo sobre la vela (defecto: 20)
   disableWickBodyFilter:    boolean;  // true = ignorar la regla del 20%
+
+  // [BYPASS DIMENSIÓN]
+  disableDimensionFilter:       boolean;
+  minAmplitudeForexPct:         number;
+  minAmplitudeIndicesPoints:    number;
 }
 
 interface TradingState {
   accountType: "real" | "fondeo" | "demo";
   account: PropAccount;
   config: TTPChallenge;
-  positions: TradePosition[];
+  positions: any[]; // [POSITIONS MODULE] updated to any[] to avoid conflict with TradePosition and Position
   logs: TradeResult[];
   risk: RiskMetrics;
   connection: BrokerConnection;
@@ -108,6 +133,14 @@ interface TradingState {
   historicalTrades: HistoricalTrade[];
   botConfig: BotConfig;
   isLeftSidebarOpen: boolean;
+
+  // [POSITIONS MODULE]
+  tradeHistory: ClosedTrade[];
+
+  // Acciones
+  setPositions:      (positions: Position[]) => void;
+  initHistory:       (trades: ClosedTrade[]) => void;
+  appendHistory:     (trade: ClosedTrade) => void;
 
   // Actions
   setAccountType: (type: "real" | "fondeo" | "demo") => void;
@@ -200,8 +233,23 @@ export const useTradingStore = create<TradingState>()(
 
         maxWickBodyRatio:      20,
         disableWickBodyFilter: false,
+
+        // [BYPASS DIMENSIÓN]
+        disableDimensionFilter:       false,
+        minAmplitudeForexPct:         0.08,
+        minAmplitudeIndicesPoints:    20.0,
       },
       isLeftSidebarOpen: false,
+
+      // [POSITIONS MODULE]
+      tradeHistory: [],
+
+      // [POSITIONS MODULE]
+      setPositions:  (positions) => set({ positions }),
+      initHistory:   (trades)    => set({ tradeHistory: trades }),
+      appendHistory: (trade)     => set((state) => ({
+        tradeHistory: [trade, ...state.tradeHistory].slice(0, 500) // cap en 500
+      })),
 
       setAccountType: (type) => set({ accountType: type }),
       setHistoricalTrades: (trades) => set({ historicalTrades: trades }),

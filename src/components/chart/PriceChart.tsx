@@ -714,27 +714,35 @@ export function PriceChart({ symbol, timeframe }: Props) {
     const activeLineIds = new Set<string>();
 
     positions.filter(p => p.symbol === symbol).forEach((pos) => {
+      if (!pos.open_price && !pos.entryPrice) return;
+
+      const posId = pos.ticket ?? pos.id;
+      const posType = (pos.type ?? pos.order_type ?? "buy").toString().toUpperCase();
+      const posEntryPrice = pos.open_price ?? pos.entryPrice ?? pos.price;
+      const posLotSize = pos.volume ?? pos.lotSize ?? 0;
+      const posPnl = pos.profit ?? pos.pnl ?? 0;
+
       // Entry Line
-      const entryId = `pos_entry_${pos.id}`;
+      const entryId = `pos_entry_${posId}`;
       activeLineIds.add(entryId);
       if (!map.has(entryId)) {
         const pl = series.createPriceLine({
-          price: pos.entryPrice,
-          color: pos.type === "BUY" ? TV_COLORS.blue : TV_COLORS.red,
+          price: posEntryPrice,
+          color: posType === "BUY" ? TV_COLORS.blue : TV_COLORS.red,
           lineWidth: 2,
           lineStyle: 0,
           axisLabelVisible: true,
-          title: `${pos.type} ${pos.lotSize}`,
+          title: `${posType} ${posLotSize}`,
         });
         map.set(entryId, pl);
       } else {
          // Update title with live PnL
-         map.get(entryId)?.applyOptions({ price: pos.entryPrice, title: `${pos.type} ${pos.lotSize} (${pos.pnl > 0 ? '+':''}${pos.pnl.toFixed(2)})` });
+         map.get(entryId)?.applyOptions({ price: posEntryPrice, title: `${posType} ${posLotSize} (${posPnl > 0 ? '+':''}${posPnl.toFixed(2)})` });
       }
 
       // SL Line
       if (pos.sl && pos.sl > 0) {
-        const slId = `pos_sl_${pos.id}`;
+        const slId = `pos_sl_${posId}`;
         activeLineIds.add(slId);
         if (!map.has(slId)) {
           const pl = series.createPriceLine({
@@ -748,7 +756,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
           map.set(slId, pl);
         } else {
           // Only update if not currently being dragged
-          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== pos.id || dragStateRef.current?.lineType !== "sl") {
+          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== posId || dragStateRef.current?.lineType !== "sl") {
             map.get(slId)?.applyOptions({ price: pos.sl });
           }
         }
@@ -756,7 +764,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
 
       // TP Line
       if (pos.tp && pos.tp > 0) {
-        const tpId = `pos_tp_${pos.id}`;
+        const tpId = `pos_tp_${posId}`;
         activeLineIds.add(tpId);
         if (!map.has(tpId)) {
           const pl = series.createPriceLine({
@@ -769,7 +777,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
           });
           map.set(tpId, pl);
         } else {
-          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== pos.id || dragStateRef.current?.lineType !== "tp") {
+          if (!dragStateRef.current?.active || dragStateRef.current?.posId !== posId || dragStateRef.current?.lineType !== "tp") {
             map.get(tpId)?.applyOptions({ price: pos.tp });
           }
         }

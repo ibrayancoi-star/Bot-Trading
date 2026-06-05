@@ -1,0 +1,494 @@
+═══════════════════════════════════════════════════════════════
+  ESTRUCTURA TÉCNICA DEL PROYECTO — BOT CRT TRADING DASHBOARD
+═══════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. STACK TECNOLÓGICO COMPLETO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FRONTEND:
+  Lenguaje ............. TypeScript (strict mode)
+  Framework ............ Next.js 16.2.6 (App Router)
+  React ................ 19.2.4
+  Gráficos ............. Lightweight Charts 5.2.0
+  Estado Global ........ Zustand 5.0.13 (con middleware persist)
+  Estilos .............. TailwindCSS 4 + tw-animate-css
+  Componentes UI ....... shadcn/ui 4.7.0 (Radix primitives)
+  Iconos ............... Lucide React
+  Utilidades CSS ....... clsx + tailwind-merge + class-variance-authority
+
+BACKEND / BRIDGE:
+  Lenguaje ............. Python 3.x
+  Servidor WS .......... websockets (asyncio)
+  Conexión MT5 ......... MetaTrader5 (paquete oficial)
+  Concurrencia ......... threading (3 hilos paralelos)
+  Zona horaria ......... pytz (Atlantic/Canary)
+
+MOTOR DE IA CONTEXTUAL:
+  Base vectorial ....... ChromaDB (local, persistente en ./chroma_db/)
+  Embeddings ........... SentenceTransformers (all-MiniLM-L6-v2)
+  Reglas estáticas ..... crt_rules_curated.md (cargadas al arranque)
+
+CONFIGURACIÓN:
+  Parámetros fijos ..... config_crt.json
+  Variables entorno .... .env.local (claves API Binance/cTrader)
+
+COMUNICACIÓN:
+  Protocolo ............ WebSocket bidireccional
+  Endpoint ............. ws://127.0.0.1:8000
+  Formato .............. JSON plano (eventos tipados por campo "type")
+  Frecuencia ........... Ticks a 10Hz, Scanner a 1Hz, Feedback cada 5s
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. ÁRBOL DE ARCHIVOS DEL PROYECTO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+tradingview-gratis-master/
+│
+│── mt5_bridge.py              ← Backend principal (79 KB). Servidor WS,
+│                                 scanner CRT, ejecución de órdenes,
+│                                 Risk Guard, feedback loop
+│── context_engine.py          ← Motor de IA. ChromaDB + embeddings +
+│                                 validación semántica Capa 2/3
+│── config_crt.json            ← Parámetros estáticos del motor CRT
+│── crt_rules_curated.md       ← Base de conocimiento CRT (reglas manuales)
+│── chroma_db/                 ← Persistencia local de ChromaDB
+│── .env.local                 ← Variables de entorno (API keys)
+│
+│── package.json               ← Dependencias npm del frontend
+│── next.config.ts             ← Configuración Next.js
+│── tsconfig.json              ← Configuración TypeScript
+│── postcss.config.mjs         ← PostCSS para TailwindCSS
+│── eslint.config.mjs          ← Reglas de linting
+│── components.json            ← Configuración shadcn/ui
+│
+│── RESUMEN_PROYECTO.md        ← Documentación funcional y técnica
+│── ANALISIS_ARCHIVOS.md       ← Análisis detallado de archivos
+│── README.md                  ← Readme del repositorio
+│── AGENTS.md                  ← Reglas para agentes de IA
+│
+└── src/
+    │
+    ├── app/                        ← Next.js App Router
+    │   ├── page.tsx                ← Página principal (composición del layout)
+    │   ├── layout.tsx              ← Layout raíz (meta, fonts, providers)
+    │   ├── globals.css             ← Estilos globales + variables CSS
+    │   └── api/
+    │       ├── auth/               ← Rutas de autenticación (reservado)
+    │       └── orders/             ← Rutas de órdenes (reservado)
+    │
+    ├── components/
+    │   │
+    │   ├── chart/                  ← MÓDULO: Gráfico de precios
+    │   │   ├── PriceChart.tsx      ← Componente principal (44 KB).
+    │   │   │                         Lightweight Charts, velas, líneas
+    │   │   │                         de precio, herramientas de dibujo,
+    │   │   │                         indicadores, líneas de posiciones
+    │   │   ├── SymbolSelector.tsx  ← Selector de par/instrumento
+    │   │   ├── TimeframeSelector.tsx ← Selector de temporalidad
+    │   │   ├── IndicatorMenu.tsx   ← Menú de indicadores técnicos
+    │   │   ├── IndicatorPill.tsx   ← Pill/badge de indicador activo
+    │   │   ├── IndicatorSettingsDialog.tsx ← Config de indicadores
+    │   │   └── MeasureOverlay.tsx  ← Overlay de medición sobre el chart
+    │   │
+    │   ├── layout/                 ← MÓDULO: Estructura del dashboard
+    │   │   ├── Header.tsx          ← Barra superior (logo, botón backtest,
+    │   │   │                         controles de conexión)
+    │   │   ├── LeftSidebar.tsx     ← Sidebar izquierdo (40 KB). Config
+    │   │   │                         completa del bot: lotaje, TP/SL,
+    │   │   │                         killzones, filtros, bypasses,
+    │   │   │                         ChromaDB, parámetros avanzados
+    │   │   ├── RightSidebar.tsx    ← Sidebar derecho. Stats de cuenta
+    │   │   │                         (balance, equity, drawdown)
+    │   │   └── BottomPanel.tsx     ← Panel inferior con tabs:
+    │   │                             Posiciones / Historial
+    │   │
+    │   ├── positions/              ← MÓDULO: Posiciones abiertas en vivo
+    │   │   ├── PositionsTable.tsx  ← Tabla de posiciones (memo)
+    │   │   ├── PositionRow.tsx     ← Fila individual (memo + comparador)
+    │   │   ├── PnlCell.tsx        ← Celda de PnL con animación flash
+    │   │   └── ModifySLTPModal.tsx ← Modal para modificar SL/TP
+    │   │
+    │   ├── history/                ← MÓDULO: Historial de trades cerrados
+    │   │   ├── HistoryTable.tsx    ← Tabla de historial
+    │   │   └── HistoryRow.tsx      ← Fila individual (memo + safeNum)
+    │   │
+    │   ├── dashboard/              ← MÓDULO: Componentes auxiliares
+    │   │   ├── AccountStats.tsx    ← Widget de estadísticas de cuenta
+    │   │   ├── HistoryPanel.tsx    ← Panel alternativo de historial
+    │   │   ├── PositionsTable.tsx  ← Tabla alternativa de posiciones
+    │   │   ├── StrategyInitializer.tsx ← Inicializador de estrategia
+    │   │   └── TradeNotifications.tsx ← Notificaciones de trades
+    │   │
+    │   ├── watchlist/              ← MÓDULO: Lista de seguimiento
+    │   │   └── Watchlist.tsx       ← Watchlist de instrumentos
+    │   │
+    │   └── ui/                     ← MÓDULO: Primitivas shadcn/ui
+    │       ├── button.tsx
+    │       ├── dialog.tsx
+    │       ├── dropdown-menu.tsx
+    │       ├── input.tsx
+    │       ├── scroll-area.tsx
+    │       ├── select.tsx
+    │       ├── separator.tsx
+    │       ├── tabs.tsx
+    │       └── tooltip.tsx
+    │
+    └── lib/
+        │
+        ├── data/
+        │   └── mock-feed.ts       ← Controlador de tráfico WebSocket
+        │                            (26 KB). Recibe mensajes del bridge,
+        │                            normaliza payloads, muta Zustand.
+        │                            Guard HMR-Safe con window.__WS__
+        │
+        ├── store/                  ← Estado global Zustand
+        │   ├── trading-store.ts   ← Store principal (11 KB). BotConfig,
+        │   │                        positions, history, ticks, account
+        │   ├── chart-store.ts     ← Store del gráfico (timeframe,
+        │   │                        indicadores, herramientas de dibujo)
+        │   └── strategy-store.ts  ← Store de estrategia
+        │
+        ├── types/                  ← Definiciones TypeScript
+        │   ├── market.ts          ← Tipos de mercado (Candle, Tick)
+        │   └── trading.ts         ← Tipos de trading (Order, Position)
+        │
+        ├── indicators/
+        │   └── index.ts           ← Cálculo de indicadores técnicos
+        │                            (SMA, EMA, RSI, MACD, Bollinger)
+        │
+        ├── trading/
+        │   └── risk-guard.ts      ← Lógica de Risk Guard frontend
+        │
+        ├── strategies/
+        │   └── runner.ts          ← Motor de ejecución de estrategias
+        │
+        ├── binance/               ← Integración Binance (reservado)
+        │   ├── rest.ts            ← Cliente REST API
+        │   ├── ws.ts              ← Cliente WebSocket
+        │   └── types.ts           ← Tipos de datos Binance
+        │
+        ├── ctrader/               ← Integración cTrader (reservado)
+        │   ├── client.ts          ← Cliente Protobuf
+        │   └── proto/             ← Definiciones Protocol Buffers
+        │
+        ├── format.ts              ← Helpers de formateo numérico
+        └── utils.ts               ← Utilidades generales (cn)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. SECUENCIA DE IMPLEMENTACIÓN (Orden cronológico)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+La construcción del proyecto siguió esta secuencia técnica:
+
+ETAPA 1 — SCAFFOLD Y FUNDACIÓN
+  1. Inicialización del proyecto Next.js con App Router
+  2. Configuración de TailwindCSS 4 + PostCSS
+  3. Instalación de shadcn/ui y generación de primitivas base
+     (button, dialog, tabs, input, select, scroll-area, etc.)
+  4. Definición del sistema de diseño en globals.css:
+     Variables CSS (--tv-blue, --tv-green, --tv-red, --background, etc.)
+     Paleta dark mode basada en zinc-900/zinc-950
+  5. Instalación de Zustand para gestión de estado global
+  6. Definición de tipos TypeScript (market.ts, trading.ts)
+
+ETAPA 2 — GRÁFICO DE PRECIOS INTERACTIVO
+  1. Integración de Lightweight Charts 5 en PriceChart.tsx
+  2. Renderizado de velas OHLC con datos de mercado
+  3. SymbolSelector — selector de par/instrumento
+  4. TimeframeSelector — cambio de temporalidad
+  5. Indicadores técnicos calculados en frontend (SMA, EMA,
+     RSI, MACD, Bollinger Bands) con menú y pills visuales
+  6. Herramientas de dibujo sobre el gráfico (líneas, medición)
+  7. MeasureOverlay — overlay de cálculo de distancia/pips
+
+ETAPA 3 — LAYOUT TIPO TRADINGVIEW
+  1. Header.tsx — barra superior con logo y controles globales
+  2. LeftSidebar.tsx — panel lateral izquierdo (config del bot)
+  3. RightSidebar.tsx — panel lateral derecho (stats de cuenta)
+  4. Composición del layout completo en page.tsx
+  5. Diseño responsivo con grid CSS
+
+ETAPA 4 — BACKEND PYTHON (mt5_bridge.py)
+  1. Servidor WebSocket asyncio en puerto 8000
+  2. Conexión nativa a MetaTrader 5 (inicialización + login)
+  3. tick_broadcaster — hilo que emite precios a 10Hz
+  4. Resolución de símbolos del broker con caché (sufijos .ecn)
+  5. Descarga de velas históricas y envío al frontend
+  6. Implementación del sistema de eventos JSON tipados
+
+ETAPA 5 — MOTOR CRT (Estrategia autónoma)
+  1. update_reference_ranges() — selección de vela H4 de anclaje
+     por calendario de hora Canaria (Atlantic/Canary)
+  2. strategy_scanner_task — hilo a 1Hz que evalúa sweeps
+  3. Detección de sweep: bid > CRT_HIGH → SELL, ask < CRT_LOW → BUY
+  4. validate_hard_rules() — 5 filtros secuenciales de Capa 1:
+     a) Filtro de Horario (Killzones + Nine AM Model Cycle)
+     b) Filtro de Spread (ratio sobre ATR + máximo absoluto)
+     c) Filtro de ATR mínimo (volatilidad insuficiente)
+     d) Filtro de Ratio Mecha CRT (cuerpo vs mecha M1)
+     e) Filtro de Dimensión (amplitud mínima de la caja H4)
+  5. try_order_send() — envío de orden con 3 modos filling
+     (IOC → FOK → RETURN)
+  6. Cooldown de 3 minutos por símbolo tras ejecución
+  7. Risk Guard — monitoreo de drawdown a 10Hz con cierre de
+     pánico si supera 4.5% o 8.0% del balance
+
+ETAPA 6 — MOTOR DE IA CONTEXTUAL (context_engine.py)
+  1. Inicialización de ChromaDB local (./chroma_db/)
+  2. Carga de crt_rules_curated.md como base de conocimiento
+  3. validate_market_context() — query semántica contra la
+     colección "crt_knowledge" para validar/vetar setups
+  4. feedback_loop_task — hilo cada 5s que registra trades
+     cerrados en ChromaDB como capa_2 (WIN) o capa_3 (LOSS)
+  5. Aprendizaje por refuerzo negativo: trades perdedores
+     bloquean setups similares automáticamente
+
+ETAPA 7 — CONEXIÓN FRONTEND ↔ BACKEND
+  1. mock-feed.ts — controlador de tráfico WebSocket
+  2. Guard HMR-Safe: socket singleton en window.__WS__
+  3. Suscripción única con flag en window.__zustandSubbed__
+  4. trading-store.ts — estado global con middleware persist:
+     BotConfig, positions, tradeHistory, accountStats, ticks
+  5. chart-store.ts — estado del gráfico separado
+  6. Persistencia de botConfig y isBotActive en localStorage
+  7. Normalización defensiva de payloads del bridge
+     (fallbacks con nullish coalescing para diferentes brokers)
+
+ETAPA 8 — CONFIGURACIÓN DINÁMICA DEL BOT
+  1. LeftSidebar.tsx — formulario completo de configuración:
+     Lotaje, TP, SL, Max Posiciones
+  2. Killzones configurables (London/NY/Asian) con horarios
+  3. Filtros de Capa 1 con switches de bypass:
+     - disableSpreadFilter + maxSpreadPoints
+     - disableAtrFilter + minAtrPips
+     - disableWickBodyFilter + maxWickBodyRatio
+     - disableDimensionFilter + minAmplitudeForexPct
+       + minAmplitudeIndicesPoints
+  4. Parámetros de ChromaDB (threshold, topK)
+  5. Parámetros avanzados (trailing stop, cierre parcial,
+     multiplicadores TBS/TWS, confluencia M1/M15, SMT check)
+  6. Envío por WebSocket (BOT_CONFIG_UPDATE) al bridge
+  7. Recepción en mt5_bridge.py con threading.Lock para
+     lectura segura de BotConfig compartido entre hilos
+
+ETAPA 9 — PANEL DE POSICIONES E HISTORIAL
+  1. Interfaces Position y ClosedTrade en trading-store.ts
+  2. Acciones Zustand: setPositions, initHistory, appendHistory
+  3. PositionsTable + PositionRow (React.memo con comparador)
+  4. PnlCell con animación flash CSS (sin re-render padre)
+  5. HistoryTable + HistoryRow (React.memo + safeNum helper)
+  6. ModifySLTPModal — modificación interactiva de SL/TP
+  7. sendClosePosition — cierre de posiciones desde el frontend
+  8. BottomPanel.tsx — tabs Posiciones / Historial
+  9. PriceChart.tsx — líneas horizontales sobre posiciones
+     abiertas (entrada, SL, TP) con actualización en vivo
+  10. Normalización de campos del bridge en mock-feed.ts:
+      positions, history_init, history_update
+
+ETAPA 10 — CORRECCIÓN DE BUGS Y ESTABILIZACIÓN
+  1. Fix TypeError mock-feed.ts: t.type.toLowerCase() sobre
+     undefined → fallback (t.type ?? t.order_type ?? "buy")
+  2. Fix Assertion PriceChart.tsx: pos.entryPrice undefined →
+     guard + fallback (pos.open_price ?? pos.entryPrice ?? pos.price)
+  3. Fix Keys duplicadas HistoryTable.tsx: ticket/close_time
+     undefined → fallback con Math.random()
+  4. Fix .toFixed() crashes HistoryRow.tsx: campos numéricos
+     undefined → safeNum() helper con fallback a "—"
+  5. Normalización exhaustiva en mock-feed.ts para
+     history_init y history_update con múltiples alias
+     de campo por broker
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. FLUJO DE DATOS EN TIEMPO REAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌─────────────┐       ┌──────────────────┐       ┌─────────────────┐
+│ MetaTrader5 │──────►│  mt5_bridge.py   │──────►│  Next.js App    │
+│  (Terminal) │ MT5   │  (Python Server) │  WS   │  (Browser)      │
+│             │ API   │                  │ :8000 │                 │
+└─────────────┘       └──────────────────┘       └─────────────────┘
+                              │                         │
+                              │                         │
+                      ┌───────┴────────┐        ┌──────┴───────┐
+                      │context_engine  │        │ mock-feed.ts │
+                      │  (ChromaDB)    │        │ (normaliza)  │
+                      └───────┬────────┘        └──────┬───────┘
+                              │                        │
+                      ┌───────┴────────┐        ┌──────┴───────┐
+                      │ config_crt.json│        │trading-store │
+                      │ (parámetros)   │        │ (Zustand)    │
+                      └────────────────┘        └──────┬───────┘
+                                                       │
+                                                ┌──────┴───────┐
+                                                │  React UI    │
+                                                │ (componentes)│
+                                                └──────────────┘
+
+EVENTOS WebSocket (Python → Frontend):
+  "tick"              → Precio bid/ask/spread cada 100ms
+  "candles"           → Velas históricas OHLC
+  "anchor_update"     → Niveles CRT (high, low, eq) del H4
+  "positions"         → Array de posiciones abiertas en MT5
+  "history_init"      → Array completo del historial de trades
+  "history_update"    → Un trade cerrado nuevo
+  "signal_evaluation" → Resultado de evaluación del scanner
+  "account_info"      → Balance, equity, margin, drawdown
+
+COMANDOS WebSocket (Frontend → Python):
+  "BOT_CONFIG_UPDATE" → Envía toda la BotConfig al bridge
+  "BOT_ACTIVE"        → Activa/desactiva el scanner
+  "CLOSE_POSITION"    → Cierra una posición por ticket
+  "MODIFY_SLTP"       → Modifica SL/TP de una posición
+  "SUBSCRIBE_SYMBOL"  → Suscribe un par al tick broadcaster
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. HILOS CONCURRENTES EN mt5_bridge.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+El backend ejecuta 4 procesos concurrentes:
+
+  HILO 1: WebSocket Server (asyncio event loop)
+    └── Puerto 8000, maneja conexiones del frontend
+    └── Recibe comandos, emite eventos
+    └── Se ejecuta en su propio thread con asyncio.run()
+
+  HILO 2: tick_broadcaster (threading.Thread)
+    └── Frecuencia: 10Hz (cada 100ms)
+    └── Lee mt5.symbol_info_tick() para cada símbolo suscrito
+    └── Emite evento "tick" con bid/ask/spread
+    └── Evalúa Risk Guard (drawdown) en cada tick
+    └── Emite "account_info" periódicamente
+
+  HILO 3: strategy_scanner_task (threading.Thread)
+    └── Frecuencia: 1Hz (cada 1 segundo)
+    └── Llama a update_reference_ranges() para recalcular H4
+    └── Evalúa sweep detection contra CRT High/Low
+    └── Si hay sweep → validate_hard_rules() (Capa 1)
+    └── Si pasa → validate_market_context() (Capa 2/3)
+    └── Si aprueba → try_order_send() (ejecución)
+    └── Lee BotConfig con _config_lock (threading.Lock)
+
+  HILO 4: feedback_loop_task (threading.Thread)
+    └── Frecuencia: cada 5 segundos
+    └── Consulta deals cerrados en MT5 (última hora)
+    └── Clasifica como PROFIT o LOSS
+    └── Registra en ChromaDB con metadata semántica
+    └── Emite "history_update" al frontend
+
+  Sincronización:
+    └── _config_lock (threading.Lock) protege la lectura/escritura
+        de BotConfig compartido entre todos los hilos
+    └── _cooldown_map (dict) con timestamps por símbolo
+    └── BOT_ACTIVE (bool global) como interruptor maestro
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. DEPENDENCIAS npm (package.json)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Producción:
+  next ..................... 16.2.6    (framework React SSR/SSG)
+  react .................... 19.2.4    (librería UI)
+  react-dom ................ 19.2.4    (renderizado DOM)
+  lightweight-charts ....... 5.2.0     (gráficos financieros)
+  zustand .................. 5.0.13    (estado global)
+  shadcn ................... 4.7.0     (componentes UI)
+  @base-ui/react ........... 1.4.1     (primitivas Radix)
+  lucide-react ............. 1.14.0    (iconos SVG)
+  class-variance-authority . 0.7.1     (variantes de clases)
+  clsx ..................... 2.1.1     (condicionales de clases)
+  tailwind-merge ........... 3.6.0     (merge de clases Tailwind)
+  tw-animate-css ........... 1.4.0     (animaciones Tailwind)
+  protobufjs ............... 8.3.0     (Protocol Buffers, cTrader)
+
+Desarrollo:
+  tailwindcss .............. 4.x       (CSS utility-first)
+  @tailwindcss/postcss ..... 4.x       (plugin PostCSS)
+  typescript ............... 5.x       (tipado estático)
+  eslint ................... 9.x       (linting)
+  eslint-config-next ....... 16.2.6    (reglas ESLint Next.js)
+  protobufjs-cli ........... 2.3.0     (compilador proto)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. DEPENDENCIAS Python (mt5_bridge.py + context_engine.py)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  MetaTrader5 .............. Conexión nativa al terminal MT5
+  websockets ............... Servidor WebSocket asyncio
+  asyncio .................. Event loop asíncrono
+  threading ................ Hilos concurrentes
+  json ..................... Serialización de eventos
+  datetime / pytz .......... Manejo de zonas horarias
+  numpy .................... Cálculos numéricos (ATR, rangos)
+  chromadb ................. Base de datos vectorial local
+  sentence-transformers .... Embeddings semánticos (all-MiniLM-L6-v2)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. PATRONES DE ARQUITECTURA UTILIZADOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Frontend:
+  ► Flux unidireccional (Zustand) — sin prop drilling
+  ► React.memo + comparadores explícitos — anti re-render a 1Hz
+  ► Singleton WebSocket (window.__WS__) — HMR-Safe
+  ► Guard de suscripción única (window.__zustandSubbed__)
+  ► Persistencia selectiva (localStorage) — sobrevive recargas
+  ► Separación de stores (trading / chart / strategy)
+  ► Normalización defensiva de payloads (nullish coalescing)
+
+Backend:
+  ► Event-Driven Architecture (EDA) — todo se mueve por eventos
+  ► Pipeline de filtros secuencial (Capa 1 → Capa 2/3 → Ejecución)
+  ► Thread safety con Lock compartido (_config_lock)
+  ► Anti-spam con timestamps de último rechazo por filtro
+  ► Cooldown por símbolo (3 min) post-ejecución
+  ► Fallback en cadena para orden de filling (IOC → FOK → RETURN)
+  ► Feedback loop de refuerzo negativo (ChromaDB)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. INTEGRACIONES RESERVADAS (No activas)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Las siguientes integraciones tienen código scaffold pero NO están
+conectadas al flujo principal del bot:
+
+  Binance (src/lib/binance/):
+    rest.ts — Cliente REST API para datos de mercado
+    ws.ts   — Cliente WebSocket para streaming de precios
+    types.ts — Tipos de datos de la API de Binance
+
+  cTrader (src/lib/ctrader/):
+    client.ts — Cliente Protobuf para Open API
+    proto/    — Definiciones Protocol Buffers
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. CÓMO EJECUTAR EL PROYECTO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Requisitos previos:
+  - Node.js 18+
+  - Python 3.10+
+  - MetaTrader 5 instalado y con cuenta logueada
+  - Paquetes Python: MetaTrader5, websockets, pytz, numpy,
+    chromadb, sentence-transformers
+
+Iniciar Backend:
+  > python mt5_bridge.py
+  (Arranca el servidor WebSocket en ws://127.0.0.1:8000)
+
+Iniciar Frontend:
+  > npm install       (solo la primera vez)
+  > npm run dev
+  (Arranca Next.js en http://localhost:3000)
+
+El frontend se conecta automáticamente al backend al cargar.
+La reconexión es automática si el bridge se reinicia.
