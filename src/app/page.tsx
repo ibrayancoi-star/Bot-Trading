@@ -26,35 +26,43 @@ export default function HomePage() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-tv-bg text-tv-text select-none">
       <Header />
       <div className="flex min-h-0 flex-1">
-        {mode === "BACKTEST" && <BacktestPanel />}
+        <div className={mode === "BACKTEST" ? "flex" : "hidden"}>
+          <BacktestPanel />
+        </div>
         <main className="relative flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 flex flex-col">
-            {mode === "BACKTEST" ? (
-              <div className="flex-1 flex flex-col min-h-0">
-                <BacktestChart symbol={symbol} />
-                <div className="p-4 bg-zinc-950 flex flex-col gap-4 border-t border-tv-border overflow-y-auto max-h-[40%]">
-                  <div className="flex justify-between items-center gap-4">
-                    <MetricsPanel />
-                    <BacktestExport />
+            {/* VISTA BACKTEST */}
+            <div className={mode === "BACKTEST" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+              <BacktestChart symbol={symbol} />
+              <div className="p-4 bg-zinc-950 flex flex-col gap-4 border-t border-tv-border overflow-y-auto max-h-[40%]">
+                <div className="flex justify-between items-center gap-4">
+                  <MetricsPanel />
+                  <BacktestExport />
+                </div>
+                <div className="flex gap-4 min-h-0 flex-1">
+                  <div className="flex-1 min-h-0">
+                    <TradeLog />
                   </div>
-                  <div className="flex gap-4 min-h-0 flex-1">
-                    <div className="flex-1 min-h-0">
-                      <TradeLog />
-                    </div>
-                    <div className="w-[300px] shrink-0">
-                      <EquityCurveChart />
-                    </div>
+                  <div className="w-[300px] shrink-0">
+                    <EquityCurveChart />
                   </div>
                 </div>
               </div>
-            ) : (
+            </div>
+
+            {/* VISTA LIVE / DEMO */}
+            <div className={mode !== "BACKTEST" ? "flex-1 flex min-h-0" : "hidden"}>
               <PriceChart symbol={symbol} timeframe={timeframe} />
-            )}
+            </div>
           </div>
         </main>
-        {mode !== "BACKTEST" && <RightSidebar />}
+        <div className={mode !== "BACKTEST" ? "flex" : "hidden"}>
+          <RightSidebar />
+        </div>
       </div>
-      {mode !== "BACKTEST" && <BottomPanel />}
+      <div className={mode !== "BACKTEST" ? "block" : "hidden"}>
+        <BottomPanel />
+      </div>
       <IndicatorSettingsDialog />
       <LeftSidebar />
     </div>

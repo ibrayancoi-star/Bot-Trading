@@ -132,6 +132,7 @@ interface TradingState {
   knownAccounts: Record<string, KnownAccount>;
   historicalTrades: HistoricalTrade[];
   botConfig: BotConfig;
+  draftBotConfig: BotConfig;
   isLeftSidebarOpen: boolean;
 
   // [POSITIONS MODULE]
@@ -158,6 +159,7 @@ interface TradingState {
   setHistoricalTrades: (trades: HistoricalTrade[]) => void;
   addHistoricalTrade: (trade: HistoricalTrade) => void;
   setBotConfig: (config: BotConfig) => void;
+  setDraftBotConfig: (config: BotConfig) => void;
   toggleLeftSidebar: () => void;
 }
 
@@ -239,6 +241,45 @@ export const useTradingStore = create<TradingState>()(
         minAmplitudeForexPct:         0.08,
         minAmplitudeIndicesPoints:    20.0,
       },
+      draftBotConfig: {
+        strategy: "scalping",
+        lotSize: 0.1,
+        takeProfitPips: 20,
+        stopLossPips: 15,
+        maxPositions: 3,
+        maxDailyLoss: 2.5,
+        chromaThreshold: 0.72,
+        chromaTopK: 5,
+        killzones: { asian: false, london: true, overlap: true, newyork: false },
+        trailingStop: false,
+        partialClose: false,
+        partialClosePct: 50,
+        modelTbsRiskMultiplier: 1.0,
+        modelTwsRiskMultiplier: 0.5,
+        hybridM1M15Confluence: true,
+        smtDivergenceCheck: true,
+
+        londonStart:   "07:00",
+        londonEnd:     "10:00",
+        newYorkStart:  "12:00",
+        newYorkEnd:    "15:00",
+        asianStart:    "02:00",
+        asianEnd:      "05:00",
+
+        maxSpreadPoints:       20,
+        disableSpreadFilter:   false,
+
+        minAtrPips:            12,
+        disableAtrFilter:      false,
+
+        maxWickBodyRatio:      20,
+        disableWickBodyFilter: false,
+
+        // [BYPASS DIMENSIÓN]
+        disableDimensionFilter:       false,
+        minAmplitudeForexPct:         0.08,
+        minAmplitudeIndicesPoints:    20.0,
+      },
       isLeftSidebarOpen: false,
 
       // [POSITIONS MODULE]
@@ -259,7 +300,7 @@ export const useTradingStore = create<TradingState>()(
             trade,
             ...state.historicalTrades.filter((t) => t.id !== trade.id),
           ].slice(0, 50), // Guardar hasta 50 últimos trades
-        })),
+          })),
 
       updateEquity: (newEquity) => {
         set((state) => ({
@@ -368,12 +409,16 @@ export const useTradingStore = create<TradingState>()(
         }),
 
       setBotConfig: (config) => {
-        set({ botConfig: config });
+        set({ botConfig: config, draftBotConfig: config });
         import("@/lib/data/mock-feed").then(({ sendBotConfig }) => {
           sendBotConfig(config);
         }).catch(err => {
           console.error("Error importando sendBotConfig:", err);
         });
+      },
+
+      setDraftBotConfig: (config) => {
+        set({ draftBotConfig: config });
       },
 
       toggleLeftSidebar: () =>
@@ -383,7 +428,12 @@ export const useTradingStore = create<TradingState>()(
     }),
     {
       name: "ttp-trading-state",
-      partialize: (state) => ({ knownAccounts: state.knownAccounts }),
+      partialize: (state) => ({
+        knownAccounts: state.knownAccounts,
+        botConfig: state.botConfig,
+        draftBotConfig: state.draftBotConfig,
+        isBotActive: state.isBotActive,
+      }),
     }
   )
 );

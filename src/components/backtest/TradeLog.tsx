@@ -69,9 +69,13 @@ export function TradeLog() {
                     <td className="px-3 py-2 text-center">
                       <div className="flex justify-center">
                         {t.chromadb_validated ? (
-                          <CheckCircle className="h-4 w-4 text-emerald-400" title="Validado con ChromaDB" />
+                          <span title="Validado con ChromaDB">
+                            <CheckCircle className="h-4 w-4 text-emerald-400" />
+                          </span>
                         ) : (
-                          <AlertTriangle className="h-4 w-4 text-amber-500 animate-pulse" title="Advertencia: Operó sin validación ChromaDB" />
+                          <span title="Advertencia: Operó sin validación ChromaDB">
+                            <AlertTriangle className="h-4 w-4 text-amber-500 animate-pulse" />
+                          </span>
                         )}
                       </div>
                     </td>

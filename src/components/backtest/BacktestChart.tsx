@@ -116,7 +116,7 @@ export function BacktestChart({ symbol }: Props) {
     // Sort markers chronologically to avoid lightweight charts warning/error
     markers.sort((a, b) => a.time - b.time);
     
-    candleSeriesRef.current.setMarkers(markers);
+    (candleSeriesRef.current as any).setMarkers(markers);
   }, [trades, candles]);
 
   return (

@@ -33,6 +33,12 @@ export function LeftSidebar() {
   const toggleLeftSidebar = useTradingStore((s) => s.toggleLeftSidebar);
   const botConfig = useTradingStore((s) => s.botConfig);
   const setBotConfig = useTradingStore((s) => s.setBotConfig);
+  const draftBotConfig = useTradingStore((s) => s.draftBotConfig);
+  const setDraftBotConfig = useTradingStore((s) => s.setDraftBotConfig);
+
+  // Hydration state
+  const [storeReady, setStoreReady] = useState(false);
+  const [initialized, setInitialized] = useState(false);
 
   // Local state for form controls
   const [strategy, setStrategy] = useState<Strategy>("scalping");
@@ -83,46 +89,137 @@ export function LeftSidebar() {
   const [dragging, setDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
-  // Sincronizar estado local al cargar o cambiar el config del store
+  // Listen to Zustand store hydration status
   useEffect(() => {
-    if (botConfig) {
-      setStrategy(botConfig.strategy);
-      setLotSize(botConfig.lotSize);
-      setTakeProfitPips(botConfig.takeProfitPips);
-      setStopLossPips(botConfig.stopLossPips);
-      setMaxPositions(botConfig.maxPositions);
-      setMaxDailyLoss(botConfig.maxDailyLoss);
-      setChromaThreshold(botConfig.chromaThreshold);
-      setChromaTopK(botConfig.chromaTopK);
-      setKillzones(botConfig.killzones);
-      setTrailingStop(botConfig.trailingStop);
-      setPartialClose(botConfig.partialClose);
-      setPartialClosePct(botConfig.partialClosePct);
-      if (botConfig.modelTbsRiskMultiplier !== undefined) setModelTbsRiskMultiplier(botConfig.modelTbsRiskMultiplier);
-      if (botConfig.modelTwsRiskMultiplier !== undefined) setModelTwsRiskMultiplier(botConfig.modelTwsRiskMultiplier);
-      if (botConfig.hybridM1M15Confluence !== undefined) setHybridM1M15Confluence(botConfig.hybridM1M15Confluence);
-      if (botConfig.smtDivergenceCheck !== undefined) setSmtDivergenceCheck(botConfig.smtDivergenceCheck);
+    const unsub = useTradingStore.persist.onFinishHydration(() => {
+      setStoreReady(true);
+    });
+    if (useTradingStore.persist.hasHydrated()) {
+      setStoreReady(true);
+    }
+    return unsub;
+  }, []);
 
-      if (botConfig.londonStart  !== undefined) setLondonStart(botConfig.londonStart);
-      if (botConfig.londonEnd    !== undefined) setLondonEnd(botConfig.londonEnd);
-      if (botConfig.newYorkStart !== undefined) setNewYorkStart(botConfig.newYorkStart);
-      if (botConfig.newYorkEnd   !== undefined) setNewYorkEnd(botConfig.newYorkEnd);
-      if (botConfig.asianStart   !== undefined) setAsianStart(botConfig.asianStart);
-      if (botConfig.asianEnd     !== undefined) setAsianEnd(botConfig.asianEnd);
+  // Initialize local states from draft (or botConfig as fallback) once hydrated
+  useEffect(() => {
+    if (!storeReady) return;
+    const configToUse = draftBotConfig || botConfig;
+    if (configToUse && !initialized) {
+      setStrategy(configToUse.strategy);
+      setLotSize(configToUse.lotSize);
+      setTakeProfitPips(configToUse.takeProfitPips);
+      setStopLossPips(configToUse.stopLossPips);
+      setMaxPositions(configToUse.maxPositions);
+      setMaxDailyLoss(configToUse.maxDailyLoss);
+      setChromaThreshold(configToUse.chromaThreshold);
+      setChromaTopK(configToUse.chromaTopK);
+      setKillzones(configToUse.killzones);
+      setTrailingStop(configToUse.trailingStop);
+      setPartialClose(configToUse.partialClose);
+      setPartialClosePct(configToUse.partialClosePct);
+      if (configToUse.modelTbsRiskMultiplier !== undefined) setModelTbsRiskMultiplier(configToUse.modelTbsRiskMultiplier);
+      if (configToUse.modelTwsRiskMultiplier !== undefined) setModelTwsRiskMultiplier(configToUse.modelTwsRiskMultiplier);
+      if (configToUse.hybridM1M15Confluence !== undefined) setHybridM1M15Confluence(configToUse.hybridM1M15Confluence);
+      if (configToUse.smtDivergenceCheck !== undefined) setSmtDivergenceCheck(configToUse.smtDivergenceCheck);
 
-      if (botConfig.maxSpreadPoints       !== undefined) setMaxSpreadPoints(botConfig.maxSpreadPoints);
-      if (botConfig.disableSpreadFilter   !== undefined) setDisableSpreadFilter(botConfig.disableSpreadFilter);
-      if (botConfig.minAtrPips            !== undefined) setMinAtrPips(botConfig.minAtrPips);
-      if (botConfig.disableAtrFilter      !== undefined) setDisableAtrFilter(botConfig.disableAtrFilter);
-      if (botConfig.maxWickBodyRatio      !== undefined) setMaxWickBodyRatio(botConfig.maxWickBodyRatio);
-      if (botConfig.disableWickBodyFilter !== undefined) setDisableWickBodyFilter(botConfig.disableWickBodyFilter);
+      if (configToUse.londonStart  !== undefined) setLondonStart(configToUse.londonStart);
+      if (configToUse.londonEnd    !== undefined) setLondonEnd(configToUse.londonEnd);
+      if (configToUse.newYorkStart !== undefined) setNewYorkStart(configToUse.newYorkStart);
+      if (configToUse.newYorkEnd   !== undefined) setNewYorkEnd(configToUse.newYorkEnd);
+      if (configToUse.asianStart   !== undefined) setAsianStart(configToUse.asianStart);
+      if (configToUse.asianEnd     !== undefined) setAsianEnd(configToUse.asianEnd);
+
+      if (configToUse.maxSpreadPoints       !== undefined) setMaxSpreadPoints(configToUse.maxSpreadPoints);
+      if (configToUse.disableSpreadFilter   !== undefined) setDisableSpreadFilter(configToUse.disableSpreadFilter);
+      if (configToUse.minAtrPips            !== undefined) setMinAtrPips(configToUse.minAtrPips);
+      if (configToUse.disableAtrFilter      !== undefined) setDisableAtrFilter(configToUse.disableAtrFilter);
+      if (configToUse.maxWickBodyRatio      !== undefined) setMaxWickBodyRatio(configToUse.maxWickBodyRatio);
+      if (configToUse.disableWickBodyFilter !== undefined) setDisableWickBodyFilter(configToUse.disableWickBodyFilter);
 
       // [BYPASS DIMENSIÓN]
-      if (botConfig.disableDimensionFilter    !== undefined) setDisableDimensionFilter(botConfig.disableDimensionFilter);
-      if (botConfig.minAmplitudeForexPct      !== undefined) setMinAmplitudeForexPct(botConfig.minAmplitudeForexPct);
-      if (botConfig.minAmplitudeIndicesPoints !== undefined) setMinAmplitudeIndicesPoints(botConfig.minAmplitudeIndicesPoints);
+      if (configToUse.disableDimensionFilter    !== undefined) setDisableDimensionFilter(configToUse.disableDimensionFilter);
+      if (configToUse.minAmplitudeForexPct      !== undefined) setMinAmplitudeForexPct(configToUse.minAmplitudeForexPct);
+      if (configToUse.minAmplitudeIndicesPoints !== undefined) setMinAmplitudeIndicesPoints(configToUse.minAmplitudeIndicesPoints);
+
+      setInitialized(true);
     }
-  }, [botConfig]);
+  }, [storeReady, draftBotConfig, botConfig, initialized]);
+
+  // Continuously write the local changes back to the store's draftBotConfig
+  useEffect(() => {
+    if (!storeReady || !initialized) return;
+
+    const draft: BotConfig = {
+      strategy,
+      lotSize,
+      takeProfitPips,
+      stopLossPips,
+      maxPositions,
+      maxDailyLoss,
+      chromaThreshold,
+      chromaTopK,
+      killzones,
+      trailingStop,
+      partialClose,
+      partialClosePct,
+      modelTbsRiskMultiplier,
+      modelTwsRiskMultiplier,
+      hybridM1M15Confluence,
+      smtDivergenceCheck,
+      londonStart,
+      londonEnd,
+      newYorkStart,
+      newYorkEnd,
+      asianStart,
+      asianEnd,
+      maxSpreadPoints,
+      disableSpreadFilter,
+      minAtrPips,
+      disableAtrFilter,
+      maxWickBodyRatio,
+      disableWickBodyFilter,
+      disableDimensionFilter,
+      minAmplitudeForexPct,
+      minAmplitudeIndicesPoints,
+    };
+
+    setDraftBotConfig(draft);
+  }, [
+    storeReady,
+    initialized,
+    strategy,
+    lotSize,
+    takeProfitPips,
+    stopLossPips,
+    maxPositions,
+    maxDailyLoss,
+    chromaThreshold,
+    chromaTopK,
+    killzones,
+    trailingStop,
+    partialClose,
+    partialClosePct,
+    modelTbsRiskMultiplier,
+    modelTwsRiskMultiplier,
+    hybridM1M15Confluence,
+    smtDivergenceCheck,
+    londonStart,
+    londonEnd,
+    newYorkStart,
+    newYorkEnd,
+    asianStart,
+    asianEnd,
+    maxSpreadPoints,
+    disableSpreadFilter,
+    minAtrPips,
+    disableAtrFilter,
+    maxWickBodyRatio,
+    disableWickBodyFilter,
+    disableDimensionFilter,
+    minAmplitudeForexPct,
+    minAmplitudeIndicesPoints,
+    setDraftBotConfig,
+  ]);
 
   // Escape key close listener
   useEffect(() => {
