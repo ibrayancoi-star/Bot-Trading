@@ -411,8 +411,8 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 
 2. **Pérdida de Configuración en Modo Borrador (Bug 2):**
    - **Síntoma:** Al configurar parámetros en el `LeftSidebar` y pulsar F5 antes de aplicar, los cambios o la configuración guardada no se respetaban.
-   - **Causa:** El estado local de React se iniciaba antes de que el store persistente de Zustand (`trading-store.ts`) terminase de hidratar el localStorage.
-   - **Fix:** Integración de validadores de hidratación en la inicialización de los componentes de configuración para que el *draft state* tome los valores correctos de la persistencia de forma asíncrona.
+   - **Causa:** El estado local de React se iniciaba sincrónicamente desde los valores por defecto del store antes de que Zustand completase la hidratación desde `localStorage`, y no existía un borrador persistente para los cambios no aplicados.
+   - **Fix:** Se introdujo `draftBotConfig` en Zustand junto a un listener asíncrono de hidratación en `LeftSidebar.tsx`. El componente ahora sincroniza su estado local hacia `draftBotConfig` de forma persistente en cada pulsación, previniendo la pérdida de datos sin sobrecargar el WebSocket.
 
 3. **Crash en el Parseo de Historial (mock-feed.ts):**
    - **Síntoma:** Error `Cannot read properties of undefined (reading 'toLowerCase')`.
@@ -427,6 +427,10 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 5. **Inestabilidad de Keys y Valores en HistoryTable/HistoryRow:**
    - **Síntoma:** Warnings de React por keys duplicadas (`undefined-178...`) y crash runtime por llamadas a `.toFixed()` sobre valores nulos.
    - **Fix:** Implementación de claves reactivas seguras `key={`${t.ticket ?? t.id}-${t.close_time ?? Math.random()}`}` y creación del helper global `safeNum(val, decimals)` para sanear matemáticamente cualquier celda en la tabla.
+
+6. **Errores de Tipado TypeScript en Next.js Build:**
+   - **Síntoma:** Falla en la compilación de producción (`npm run build`) debido a que la propiedad `setMarkers` de Lightweight Charts y el atributo `title` en iconos de Lucide-React generaban error de tipo estricto.
+   - **Fix:** Se aplicó un cast de seguridad (`as any`) para `setMarkers` en `BacktestChart.tsx` y se reestructuró el JSX en `TradeLog.tsx` envolviendo los iconos SVG en elementos `<span>` para proporcionar el tooltip nativo sin quebrar los tipos de la librería de iconos.
 
 ---
 
