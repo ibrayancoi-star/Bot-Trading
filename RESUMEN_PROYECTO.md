@@ -1,8 +1,10 @@
 # Documentación Técnica — Dashboard de Trading Híbrido CRT
 
-> **Última actualización:** 2026-06-09 · **Versión del documento:** v2.0
+> **Última actualización:** 2026-06-10 · **Versión del documento:** v3.0
 >
 > Leyenda de estado: ✅ IMPLEMENTADO · 🔶 PARCIAL · ❌ PENDIENTE
+>
+> *Todas las marcas ✅/🔶/❌ de este documento se verificaron leyendo el código fuente real (junio 2026).*
 
 ### Stack Tecnológico
 
@@ -10,7 +12,8 @@
 |------|-------------|
 | **Frontend** | Next.js 16, TypeScript, Zustand, Lightweight Charts, Tailwind CSS |
 | **Backend/Bridge** | Python 3.x, paquete `MetaTrader5`, `websockets`, `asyncio`, `pytz` |
-| **Motor Contextual** | ChromaDB, SentenceTransformers (`all-MiniLM-L6-v2`) |
+| **IA/Contexto** | ChromaDB, SentenceTransformers (`all-MiniLM-L6-v2`) |
+| **Herramientas** | Antigravity (agente IA), Claude (análisis y prompts) |
 
 ## 💡 Idea Central del Proyecto
 
@@ -634,9 +637,10 @@ Usado en el scanner cuando `use_dynamic_sl` está activo (L916).
 
 ### Cierre parcial en EQ + SL a breakeven ✅
 
-`mt5_bridge.py` L1094-1118. Cuando `partial_close_at_eq` está activo y el precio alcanza EQ:
+`mt5_bridge.py` L1094-1120, dentro del `positions_broadcaster`. Usa dos estructuras de control: `_crt_eq_target` (dict symbol→precio EQ, L166) y `_eq_done` (set de tickets ya parcialmente cerrados, L167). Cuando `partial_close_at_eq` está activo y el precio alcanza EQ:
 - Cierra `partial_close_pct`% del volumen (comment `CRT_EQ_PARTIAL`).
-- Mueve el SL de la posición restante a **breakeven** (precio de entrada).
+- Mueve el SL de la posición restante a **breakeven** (`pos.price_open`) vía `TRADE_ACTION_SLTP`.
+- Marca el ticket en `_eq_done` para no repetir; `_eq_done` se purga de tickets ya cerrados en cada ciclo.
 
 ### Multiplicadores de lotaje TBS/TWS ✅
 
@@ -669,9 +673,9 @@ Usado en el scanner cuando `use_dynamic_sl` está activo (L916).
 | Handler `risk_guard_alert` en frontend | ❌ PENDIENTE | El backend emite `risk_guard_alert` (L1287) pero `mock-feed.ts` no lo procesa todavía. |
 | Handler `anchor_update` en frontend | ❌ PENDIENTE | No hay branch `anchor_update` en `mock-feed.ts` (los handlers actuales son `bot_status`, `account`, `trade_result`, `positions`, `history`, `tick`, `history_full`, `history_init`, `history_update`). |
 | Risk Guard conectado a `maxDailyLoss` de la UI | ✅ IMPLEMENTADO | `mt5_bridge.py` L1255-1271: usa `bot_config.max_daily_loss` si `> 0`, con **fallback** a `config_crt.json → max_daily_loss_pct`. Total = 2× diario por convención. |
-| `maxPositions` validado contra posiciones totales | ✅ IMPLEMENTADO | L692-697: cuenta `mt5.positions_get()` (todas) y bloquea el scanner si `total_open >= max_positions` (antes solo comprobaba `> 0`). |
+| `maxPositions` validado contra posiciones totales | 🔶 PARCIAL | L692-697: cuenta `mt5.positions_get()` (**todas**, sin filtrar por comment) y bloquea el scanner si `total_open >= max_positions` (antes solo comprobaba `> 0`). Las posiciones manuales **sí cuentan** para el límite. |
 | Import de `crt_logic.py` con flag | ✅ IMPLEMENTADO | L31-35: `try/except` define `CRT_LOGIC_AVAILABLE`; toda la lógica CRT avanzada se condiciona a ese flag. |
-| Filtro de posiciones manuales en el scanner | 🔶 PARCIAL | El scanner salta el símbolo si **cualquier** posición está abierta para ese par (L711-713), incluidas las manuales. La clasificación bot/manual sí distingue por comment `CRT` en `send_trade_history()` (L1391), pero el bloqueo del scanner **no** filtra manuales por comment. |
+| Filtro de posiciones manuales en el scanner | 🔶 PARCIAL | El scanner salta el símbolo si **cualquier** posición está abierta para ese par (L711-713), incluidas las manuales. La clasificación bot/manual sí distingue por comment `CRT` en `send_trade_history()` (L1391), pero el bloqueo del scanner **no** filtra manuales por comment — sigue pendiente. |
 | Timezone unificado vía `_to_canary()` | ✅ IMPLEMENTADO | `mt5_bridge.py` L22: helper `_to_canary()` (pytz `Atlantic/Canary`) usado en validaciones horarias del scanner (L594, L633) y killzones. |
 
 ---
@@ -839,28 +843,37 @@ La lógica CRT se distribuye en 3 módulos Python que separan responsabilidades:
 
 ---
 
-## 🚧 Parámetros: Activos vs Fantasma
+## 🚧 Mapa de Parámetros (por efecto real verificado)
 
-### ✅ Ya implementados (antes fantasma)
+### ✅ ACTIVOS — efecto real siempre que el bot opera
+
+| Funcionalidad | Dónde se define | Verificación |
+|---------------|----------------|--------------|
+| **Max daily loss desde UI** | `BotConfig.max_daily_loss` | L1255, fallback a `config_crt.json` |
+| **Max posiciones (límite)** | `BotConfig.max_positions` | L692 (cuenta totales, incl. manuales 🔶) |
+| **Lotaje / TP / SL base** | `BotConfig.lotSize/takeProfitPips/stopLossPips` | Request de orden |
+| **Killzones + horarios** | `BotConfig.killzones` + `*_start/*_end` | `is_in_active_killzone()` (L591) |
+| **Bypass Capa 1** | `disable*Filter` + umbrales | `validate_hard_rules()` |
+
+### 🔶 CONDICIONALES — requieren flag activo (y `CRT_LOGIC_AVAILABLE`)
+
+| Funcionalidad | Flag | Verificación |
+|---------------|------|--------------|
+| **TBS / TWS** — clasificación de barrido | `require_candle_confirmation` | `classify_sweep_type()` (L211) |
+| **SL dinámico (mecha + 1.5 pips)** | `use_dynamic_sl` | L916 |
+| **Targets CRT (EQ / extremo)** | `use_crt_targets` | L926 |
+| **Cierre parcial en EQ + breakeven** | `partial_close_at_eq` / `partial_close_pct` | L1094 |
+| **SMT Divergence** | `smt_divergence_enabled` | L845 |
+| **Multiplicadores TBS/TWS** | `model_tbs/tws_risk_multiplier` | L935 |
+
+### ❌ DECORATIVOS — sin lógica activa (se guardan, no se usan)
 
 | Funcionalidad | Dónde se define | Estado |
 |---------------|----------------|--------|
-| **TBS / TWS** — clasificación de barrido | `crt_logic.classify_sweep_type()` | ✅ Implementado |
-| **Cierre parcial en EQ** | `BotConfig.partial_close_at_eq` / `partial_close_pct` | ✅ Implementado (L1094) |
-| **SMT Divergence Check** | `BotConfig.smt_divergence_enabled` | ✅ Implementado (L845) |
-| **Multiplicadores TBS/TWS** | `BotConfig.model_tbs/tws_risk_multiplier` | ✅ Implementado (L935) |
-| **Max posiciones (límite real)** | `BotConfig.max_positions` | ✅ Implementado (L692, cuenta totales) |
-| **Max daily loss desde UI** | `BotConfig.max_daily_loss` | ✅ Implementado (L1255, fallback a JSON) |
-| **SL dinámico + targets CRT** | `BotConfig.use_dynamic_sl` / `use_crt_targets` | ✅ Implementado (L916/L926) |
-
-### ❌ Aún fantasma (sin lógica activa)
-
-| Funcionalidad | Dónde se define | Estado |
-|---------------|----------------|--------|
-| **Selector de estrategia** | `STRATEGY_REGISTRY` / `useStrategyStore` | ❌ Registry existe, scanner no lo usa |
-| **Trailing Stop** | `BotConfig.trailing_stop` | ❌ Se guarda, no se usa |
-| **Confluencia M1/M15** | `BotConfig.hybrid_m1_m15_confluence` | ❌ Se guarda, no se evalúa |
-| **ATR body ratio** | `config_crt.json → min_body_to_atr_ratio` | ❌ Definido en JSON, no evaluado |
+| **Selector de estrategia** | `STRATEGY_REGISTRY` / `useStrategyStore` | Registry existe, scanner no lo usa |
+| **Trailing Stop** | `BotConfig.trailing_stop` / `trailingStop` | Se guarda, no se usa |
+| **Confluencia M1/M15** | `BotConfig.hybrid_m1_m15_confluence` | Se guarda, no se evalúa |
+| **ATR body ratio** | `config_crt.json → min_body_to_atr_ratio` | Definido en JSON, no evaluado |
 
 ---
 
@@ -956,18 +969,47 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 
 ---
 
+## ⚠️ Problemas Conocidos Activos
+
+| Problema | Estado | Detalle (verificado en código) |
+|----------|--------|-------------------------------|
+| **ChromaDB — contaminación cruzada por símbolo** | ❌ Fix pendiente | Las queries en `context_engine.py` (L111-112) usan `query_texts=[query_text]` + `n_results`, **sin `where` que filtre por `symbol`**. La dirección sí se pondera como token repetido en el texto (L105-106), pero **no hay aislamiento por símbolo**: una experiencia de EURUSD puede recuperarse al evaluar GBPUSD si el contexto semántico es similar. El metadata `symbol` se guarda (L195) pero no se usa como filtro de consulta. |
+| **Docstring obsoleto en `is_in_active_killzone()`** | 🔶 Cosmético | El docstring dice "hora UTC actual" (L592) pero el código ya usa `_to_canary()` (L594). El comportamiento es correcto (Canary); solo el comentario quedó desactualizado. |
+| **`maxPositions` / bloqueo del scanner cuentan posiciones manuales** | 🔶 Pendiente | Ver tabla de Gaps: el límite y el salto de símbolo no filtran por comment `CRT`, así que operaciones manuales afectan al bot. |
+| **Handlers `risk_guard_alert` / `anchor_update` sin frontend** | ❌ Pendiente | El backend los emite; `mock-feed.ts` no los procesa. No hay campo `anchorRanges` en el store. |
+| **IStrategy registrada pero no conectada** | 🔶 Pendiente | Ver sección IStrategy: el scanner sigue con lógica inline. |
+
+---
+
+## 📜 Historial de Tareas Realizadas (Junio 2026)
+
+| # | Tarea | Resultado |
+|---|-------|-----------|
+| 0 | **Auditoría técnica inicial** (informe `analisis-bot`) | Detección de gaps entre reglas CRT documentadas y código real |
+| 1 | **Corrección de 6 gaps críticos** | Handler base de señales, Risk Guard ↔ `maxDailyLoss`, `maxPositions` total, import `crt_logic` con flag, aislamiento de `runner.ts`, base de `risk_guard_alert` |
+| 2 | **Implementación CRT real (7 pasos)** | `classify_sweep_type` (TBS/TWS + regla 20%), `_sweep_pending` (confirmación vela 3 + timeout 180s), SL dinámico, targets EQ, SMT divergence, multiplicadores TBS/TWS, timezone unificado |
+| 3 | **Micro-prompts A–E: sistema de historial** | `send_trade_history()`, comment enriquecido, tabla footer con filtros, métricas agregadas, exportación "Copiar para IA" / "Copiar resumen" |
+| 4 | **Fix: bucle infinito `BOT_CONFIG_UPDATE`** | `git checkout` de 5 archivos para revertir el estado que reenviaba config en bucle |
+| 5 | **Fix: scanner bloqueado por posiciones manuales** | Identificado (🔶 parcial — bloqueo por símbolo aún cuenta manuales) |
+| 6 | **Fix: escala de precios 5 decimales** | `priceFormat` (precision 5, minMove 0.00001) en velas + EMAs, `localization.priceFormatter`, `scaleMargins` en `PriceChart.tsx` |
+| 7 | **Fix: sticky header + scroll en tabla historial** | `min-h-0` en cadena flex de `BottomPanel`, `overflow-x/y-auto` + `min-w-max` en tablas, `thead` sticky |
+| 8 | **Cableado de `ScannerLog`** | `scannerSignals` + `addScannerSignal` en store, handler `scanner_signal` en `mock-feed.ts` |
+| 9 | **Scripts de verificación** | `verify_crt_behavior.py` y `diagnostic_crt.py` (cliente WS de diagnóstico del scanner) |
+| 10 | **Documentación v2.0 → v3.0** | Verificación contra código real, reclasificación de parámetros, secciones de problemas conocidos e historial |
+
+---
+
 ## 🎯 Pendiente / Próximos Pasos
 
 ### Prioridad Alta
-1. **Handlers `risk_guard_alert` y `anchor_update` en frontend:** El backend ya los emite; `mock-feed.ts` aún no los procesa (el handler `scanner_signal` ya quedó cableado).
-3. **Migrar el scanner a `IStrategy`:** Conectar `strategy_scanner_task()` a `STRATEGY_REGISTRY` / `CRTStrategy` en vez de la lógica inline. Habilitar el selector de estrategia.
-4. **Filtro de manuales en el bloqueo del scanner:** Hoy cualquier posición abierta (incluida manual) salta el símbolo; filtrar por comment `CRT` para que las manuales no detengan al bot.
+- **P1 — Fix ChromaDB discriminación símbolo/dirección:** Añadir `where={"symbol": symbol}` (o filtro equivalente) a las queries de `context_engine.py` para eliminar la contaminación cruzada entre pares. La discriminación direccional ya está; falta la de símbolo.
+- **P2 — Verificar pipeline completo con flags CRT activos:** Probar end-to-end con `require_candle_confirmation`, `use_dynamic_sl`, `use_crt_targets`, `smt_divergence_enabled` y `partial_close_at_eq` encendidos (usar `verify_crt_behavior.py` / `diagnostic_crt.py`).
+- **P2b — Handlers `risk_guard_alert` / `anchor_update` y filtro de manuales:** Cablear los handlers faltantes en `mock-feed.ts` y hacer que el bloqueo del scanner filtre posiciones por comment `CRT`.
 
 ### Prioridad Media
-5. **Trailing Stop:** `BotConfig.trailing_stop` se guarda pero no mueve el SL. Implementar breakeven + seguimiento.
-6. **Confluencia M1/M15:** `hybrid_m1_m15_confluence` sin lógica de divergencia entre temporalidades.
-7. **UI del Optimizador:** Panel frontend para `optimizer.py` (grilla, heatmap, mejores combinaciones).
-8. **Panel de evaluación CRT en tiempo real:** Semáforo por fase del scanner.
+- **P3 — Conectar selector de estrategia a `STRATEGY_REGISTRY`:** Migrar `strategy_scanner_task()` a `IStrategy` / `CRTStrategy`.
+- **P4 — Trailing stop, confluencia M1/M15, UI del optimizador:** Implementar las features decorativas restantes.
+- **Panel de evaluación CRT en tiempo real:** Semáforo por fase del scanner.
 
 ### Prioridad Baja
 8. **Walk-forward analysis:** Validación de robustez con ventanas in-sample/out-sample.

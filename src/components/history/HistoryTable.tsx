@@ -26,10 +26,10 @@ export function HistoryTable() {
   const filtered = filter === "all"
     ? tradeHistory
     : tradeHistory.filter((t) =>
-        filter === "bot"
-          ? (t.origin === "bot" || t.origin === "bot_partial")
-          : t.origin === "manual"
-      );
+      filter === "bot"
+        ? (t.origin === "bot" || t.origin === "bot_partial")
+        : t.origin === "manual"
+    );
 
   // [HISTORY-FIX-3] Copiar JSON compacto para IA
   const handleCopyJson = () => {
@@ -69,11 +69,10 @@ export function HistoryTable() {
   const tabBtn = (key: "all" | "bot" | "manual", label: string) => (
     <button
       onClick={() => setFilter(key)}
-      className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-        filter === key
+      className={`px-3 py-1 rounded text-xs font-medium transition-colors ${filter === key
           ? "bg-zinc-700 text-zinc-100"
           : "bg-zinc-800/40 text-zinc-400 hover:bg-zinc-800/70"
-      }`}
+        }`}
     >
       {label}
     </button>
@@ -124,20 +123,22 @@ export function HistoryTable() {
         </div>
       ) : (
         <div className="overflow-y-auto overflow-x-auto flex-1 min-h-0">
-          <table className="w-full min-w-max text-sm text-left">
-            <thead className="text-xs text-zinc-500 uppercase bg-zinc-900/50 sticky top-0 z-10">
+          <table className="w-full min-w-max text-sm text-left border-collapse">
+            {/* [HISTORY-FIX-4] Header sticky con fondo SÓLIDO y sticky por celda
+                para evitar que las filas se vean a través al hacer scroll */}
+            <thead className="text-xs text-zinc-500 uppercase">
               <tr>
-                <th className="px-4 py-3 font-medium">Ticket</th>
-                <th className="px-4 py-3 font-medium">Símbolo</th>
-                <th className="px-4 py-3 font-medium">Dir</th>
-                <th className="px-4 py-3 font-medium">Vol</th>
-                <th className="px-4 py-3 font-medium">P.Apertura</th>
-                <th className="px-4 py-3 font-medium">P.Cierre</th>
-                <th className="px-4 py-3 font-medium text-right">Pips</th>
-                <th className="px-4 py-3 font-medium text-right">P/L Neto</th>
-                <th className="px-4 py-3 font-medium">Duración</th>
-                <th className="px-4 py-3 font-medium">Origen</th>
-                <th className="px-4 py-3 font-medium">Hora cierre</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Ticket</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Símbolo</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Dir</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Vol</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">P.Apertura</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">P.Cierre</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800 text-right">Pips</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800 text-right">P/L Neto</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Duración</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Origen</th>
+                <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 font-medium border-b border-zinc-800">Hora cierre</th>
               </tr>
             </thead>
             <tbody>
