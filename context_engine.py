@@ -101,7 +101,10 @@ def validate_market_context(setup_name: str, market_snapshot: str, chroma_thresh
     De lo contrario, devuelve:
       {"approved": True, "reason": "Validación correcta", "distance": float}
     """
-    query_text = f"Setup: {setup_name}. Market Context: {market_snapshot}"
+    # [CRT-IMPL-7] Direccion como discriminador fuerte
+    direction_token = "BUY" if "BUY" in setup_name.upper() else "SELL" if "SELL" in setup_name.upper() else ""
+    setup_name_weighted = f"{direction_token} {direction_token} {direction_token} | {setup_name}" if direction_token else setup_name
+    query_text = f"Setup: {setup_name_weighted}. Market Context: {market_snapshot}"
 
     try:
         results = collection.query(
@@ -161,10 +164,14 @@ def add_trade_experience(trade_data: dict):
     spread = trade_data.get("spread", 0.0)
     setup_initial = trade_data.get("setup_initial", "N/A")
 
+    # [CRT-IMPL-7] Direccion como discriminador fuerte
+    direction_token = str(trade_type).upper()
+    setup_initial_weighted = f"{direction_token} {direction_token} {direction_token} | {setup_initial}" if direction_token in ["BUY", "SELL"] else setup_initial
+
     # Redactar string semántico explicativo del resultado
     semantic_str = (
         f"Trade cerrado con resultado de {outcome} en el par {symbol} para la operación de {trade_type} "
-        f"utilizando el setup inicial {setup_initial}. El trade resultó en {pips_result} pips de beneficio/pérdida "
+        f"utilizando el setup inicial {setup_initial_weighted}. El trade resultó en {pips_result} pips de beneficio/pérdida "
         f"con un spread promedio de {spread} pips."
     )
 

@@ -59,7 +59,8 @@ export function BottomPanel() {
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-hidden bg-zinc-950">
+      {/* [UI-FIX-2] flex column + min-h-0 para que las tablas hijas hagan scroll dentro del footer */}
+      <div className="flex flex-1 min-h-0 flex-col overflow-hidden bg-zinc-950">
         {activeTab === "positions" && <PositionsTable />}
         {activeTab === "history" && <HistoryTable />}
       </div>

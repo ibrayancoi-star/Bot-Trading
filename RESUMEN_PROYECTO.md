@@ -1,5 +1,17 @@
 # Documentación Técnica — Dashboard de Trading Híbrido CRT
 
+> **Última actualización:** 2026-06-09 · **Versión del documento:** v2.0
+>
+> Leyenda de estado: ✅ IMPLEMENTADO · 🔶 PARCIAL · ❌ PENDIENTE
+
+### Stack Tecnológico
+
+| Capa | Tecnologías |
+|------|-------------|
+| **Frontend** | Next.js 16, TypeScript, Zustand, Lightweight Charts, Tailwind CSS |
+| **Backend/Bridge** | Python 3.x, paquete `MetaTrader5`, `websockets`, `asyncio`, `pytz` |
+| **Motor Contextual** | ChromaDB, SentenceTransformers (`all-MiniLM-L6-v2`) |
+
 ## 💡 Idea Central del Proyecto
 
 Plataforma de trading avanzada (tipo TradingView) con ejecución autónoma, analítica de mercado en tiempo real y un motor de inteligencia contextual en un solo entorno.
@@ -27,45 +39,243 @@ config_crt.json (parámetros fijos)
 
 ---
 
-## 📊 Estado Actual e Integración del Sistema
+## 🔀 Sistema de Modos Operativos
 
-### Estado Actual del Proyecto
-El proyecto se encuentra en una **fase funcional avanzada** (MVP operativo) con la arquitectura base fuertemente consolidada.
-- El **Frontend** es totalmente interactivo, renderizando el mercado en vivo a 1Hz, permitiendo la configuración dinámica del bot y la gestión manual de operaciones (cierre, modificación de SL/TP).
-- El **Backend (mt5_bridge.py)** está estable. Gestiona concurrentemente la conexión bidireccional por WebSocket con el frontend y la conexión local con el terminal de MetaTrader 5.
-- La **Integración Semántica (ChromaDB)** está activa y el *feedback loop* registra automáticamente los trades ganadores y perdedores para generar reglas dinámicas de Capa 3.
+El proyecto opera en **tres modos mutuamente excluyentes** gestionados por `useModeStore` (Zustand):
 
-### Funcionalidad Esperada vs. Estrategia
-Según la lógica del código y la estrategia institucional diseñada (Candle Range Theory + Smart Money Concepts), el flujo funcional esperado es:
-1. **Identificación de la Caja (Anclaje):** El bot debe enmarcar automáticamente los extremos (High/Low) de una vela H4 específica que sirve como el campo de batalla de la sesión.
-2. **Detección de la Trampa (Sweep):** El precio M1 rompe (hace sweep) del máximo o mínimo de esa caja H4 engañando a los operadores retail.
-3. **Validación Exhaustiva (Hard Rules):** El setup debe sobrevivir a un exigente escrutinio: debe ocurrir en una Killzone (horario institucional), el spread no debe ser abusivo, la volatilidad (ATR) debe ser suficiente, la vela M1 de rechazo debe mostrar mecha (no cuerpo envolvente) y la caja H4 debe ser lo suficientemente grande (Filtro de Dimensión).
-4. **Filtro de IA (Sentido Común Institucional):** Si el contexto actual coincide con escenarios históricamente perdedores (registrados en ChromaDB) o quiebra reglas curatoriales del manual CRT, la señal es vetada (`DISMISSED`).
-5. **Ejecución y Gestión (Risk Guard):** Al aprobar todas las capas, se dispara una orden a mercado en dirección contraria al sweep. Automáticamente se calculan el TP y SL. El sistema monitoriza constantemente el drawdown; si la equidad sufre un colapso grave (>4.5% o >8%), activa un botón de pánico global que cierra posiciones y detiene el bot.
+```typescript
+export type DashboardMode = "DEMO" | "BACKTEST" | "LIVE";
+```
 
-### ¿Cómo está integrado todo?
-La integración sigue un modelo de **Event-Driven Architecture (EDA)** reactivo:
-- **MT5 a Python:** A través del paquete `MetaTrader5` oficial, un hilo (`tick_broadcaster`) extrae precios cada 100ms. Otro hilo (`strategy_scanner_task`) evalúa la estrategia a 1Hz. Un tercer hilo (`feedback_loop_task`) monitorea trades cerrados cada 5s para alimentar a la IA.
-- **Python a Next.js (Frontend):** Se utiliza `websockets` en un hilo dedicado (puerto 8000). Envía eventos JSON (`tick`, `anchor_update`, `positions`, `history_update`, `signal_evaluation`).
-- **Next.js a Zustand (Estado Global):** `mock-feed.ts` actúa como el "Controlador de Tráfico". Recibe los JSONs, normaliza los datos (para prevenir inconsistencias de diferentes brokers de MT5) y muta de forma inmutable el estado en `trading-store.ts`. 
-- **Zustand a UI:** Gracias a las suscripciones atómicas y `React.memo`, componentes como el gráfico (Lightweight Charts), las tablas de posiciones y los controles de configuración se re-renderizan independientemente, soportando la alta frecuencia de actualizaciones sin degradar el rendimiento del navegador. Todo el estado de configuración y conexión sobrevive a recargas gracias a la persistencia en `localStorage`.
+El usuario alterna entre modos desde el **Header** mediante tres botones pill con colores semánticos:
+- **DEMO** → `bg-tv-blue` (azul)
+- **BACKTEST** → `bg-purple-600` (púrpura)
+- **LIVE** → `bg-rose-600` (rojo)
+
+> El cambio de modo **no destruye componentes**. Se usa `className="hidden"` / CSS visibility para mantener las instancias de WebSocket y gráficos vivas evitando reconexiones destructivas (lección del Bug 1).
 
 ---
 
-## 🤖 Motor CRT — Cómo Evalúa el Gráfico
+## 🟦 MODO DEMO — Simulación Visual sin Riesgo
 
-El bot implementa la metodología **Candle Range Theory (CRT)** en 6 fases secuenciales ejecutadas a 1Hz por el escáner autónomo (`strategy_scanner_task`).
+### Propósito
+Permitir al usuario explorar la interfaz completa, visualizar el mercado en vivo, configurar parámetros del bot y familiarizarse con la plataforma **sin ejecutar operaciones reales** ni conectar con una cuenta de trading real.
+
+### Cómo Funciona Técnicamente
+
+#### Flujo de Datos
+```
+MT5 (datos de mercado) ──► mt5_bridge.py ──ws──► mock-feed.ts ──► trading-store.ts ──► UI
+                                                     │
+                                                     └── Normaliza payloads de diferentes brokers
+                                                         con nullish coalescing defensivo
+```
+
+1. **Conexión WebSocket:** El frontend se conecta al bridge Python en `ws://127.0.0.1:8000`. El `tick_broadcaster` del bridge emite datos de precio cada 100ms.
+2. **Recepción y normalización:** `mock-feed.ts` actúa como controlador de tráfico. Recibe JSONs (`tick`, `anchor_update`, `positions`, `signal_evaluation`) y los normaliza para prevenir inconsistencias de brokers distintos.
+3. **Estado Global:** Los datos normalizados mutan inmutablemente el estado en `trading-store.ts` (Zustand con persistencia en `localStorage`).
+4. **Renderizado:** `PriceChart` (Lightweight Charts), tablas de posiciones y controles de configuración se re-renderizan independientemente gracias a suscripciones atómicas de Zustand + `React.memo`.
+
+#### Bot en Modo DEMO
+- El escáner CRT (`strategy_scanner_task`) **sí evalúa señales** (detecta sweeps, valida hard rules, consulta ChromaDB).
+- Las señales se envían al frontend como eventos `signal_evaluation` para que el usuario vea qué habría pasado.
+- **NO ejecuta órdenes.** El flag `BOT_ACTIVE` controla si se dispara `try_order_send()`.
+- El usuario puede activar/desactivar el bot desde el `LeftSidebar`, pero en modo DEMO esta activación es visual (el motor evalúa pero no opera).
+
+### Qué se Aprecia en la Interfaz
+
+| Elemento UI | Componente | Qué muestra |
+|-------------|-----------|-------------|
+| **Gráfico de velas** | `PriceChart.tsx` | Velas M1/M5/M15/H1/H4 en tiempo real con Lightweight Charts. Incluye líneas horizontales de CRT (High, Low, Equilibrium) |
+| **Indicadores técnicos** | `IndicatorMenu.tsx` / `IndicatorSettingsDialog.tsx` | EMA 9/21, RSI, MACD superpuestos al gráfico. Configurables en período y estilo |
+| **Selector de símbolo** | `SymbolSelector.tsx` | Dropdown para cambiar par de divisas/índice activo |
+| **Selector de temporalidad** | `TimeframeSelector.tsx` | Botones de temporalidad (1m, 5m, 15m, 1h, 4h) |
+| **Panel de configuración CRT** | `LeftSidebar.tsx` (modal flotante arrastrable) | Todos los parámetros del bot: lotaje, TP/SL, killzones, filtros con bypass, umbrales ChromaDB, multiplicadores TBS/TWS |
+| **Estadísticas de cuenta** | `AccountStats.tsx` | Balance, equity, drawdown diario y total con barras de progreso visuales y badge de estado |
+| **Panel de posiciones** | `PositionsTable.tsx` | Tabla de posiciones abiertas (vacía en DEMO puro) con PnL flotante en tiempo real |
+| **Historial de trades** | `HistoryPanel.tsx` | Historial de operaciones cerradas con análisis del Feedback Loop expandible (ChromaDB insights) |
+| **Barra de conexión MT5** | `Header.tsx` | Indicador de estado: verde pulsante (Activo), amarillo (Conectando), rojo (Inactivo) con login/servidor |
+| **Panel derecho** | `RightSidebar.tsx` | Watchlist de símbolos y resumen de mercado |
+| **Panel inferior** | `BottomPanel.tsx` | Posiciones + Historial en pestañas |
+| **Notificaciones de trade** | `TradeNotifications.tsx` | Toasts animados cuando el bot evalúa o ejecuta señales |
+
+### Estado Actual: ✅ Funcional
+- El modo DEMO está operativo. Es el **modo por defecto** al arrancar (`mode: "DEMO"` en el store).
+- La interfaz completa se renderiza, el gráfico recibe datos en vivo, y las evaluaciones del scanner se visualizan.
+
+### Pendiente en DEMO
+| Funcionalidad | Estado | Detalle |
+|---------------|--------|---------|
+| Señales fantasma en el gráfico | ❌ No implementado | Dibujar marcadores donde el bot *habría* operado sin riesgo real |
+| Panel de evaluación CRT visual | ❌ No implementado | Mostrar en tiempo real las 6 fases de evaluación con semáforo (✅/❌ por cada filtro) |
+| Replay de sesiones pasadas | ❌ No implementado | Cargar datos históricos y reproducir la sesión como si fuera en vivo |
 
 ---
 
-### FASE 1 — Selección de la Vela de Anclaje H4
+## 🟪 MODO BACKTEST — Simulación Histórica Controlada
 
-**Código:** [`update_reference_ranges()`](mt5_bridge.py#L447)
+### Propósito
+Evaluar la estrategia CRT sobre datos históricos de MT5 con un motor de simulación independiente, calculando métricas de rendimiento (Win Rate, Profit Factor, Max Drawdown, Sharpe Ratio) sin riesgo alguno.
 
-El bot **no usa la vela H4 anterior genérica**. Selecciona una vela H4 **cerrada y específica** según un calendario de anclaje basado en la hora de Canarias (`Atlantic/Canary`):
+### Cómo Funciona Técnicamente
+
+#### Arquitectura del Backtesting
+```
+BacktestPanel.tsx (UI)
+    │ startBacktest({ symbol, timeframe, from, to, config })
+    ▼
+backtest-feed.ts ──ws──► mt5_bridge.py
+    │                        │
+    │                        ▼
+    │                  backtesting_engine.py
+    │                        │
+    │                  ┌─────┴──────────────┐
+    │                  │  DataLayer          │ ← Fetch histórico de MT5
+    │                  │  SimEngine.run()    │ ← Loop vela-a-vela
+    │                  │  ResultsStreamer    │ ← Métricas + Markdown log
+    │                  └─────┬──────────────┘
+    │                        │
+    │    ◄──ws── mensajes prefijados "backtest_"
+    ▼
+backtest-store.ts (Zustand aislado)
+    │
+    ▼
+BacktestChart / MetricsPanel / EquityCurveChart / TradeLog
+```
+
+#### Flujo Detallado
+
+1. **Configuración (Frontend):** El usuario selecciona en `BacktestPanel.tsx`:
+   - Símbolo (EURUSD, GBPUSD)
+   - Temporalidad (1m, 5m, 15m, 1h, 4h)
+   - Rango de fechas (desde / hasta)
+   - Parámetros del bot (lotaje, TP/SL, umbral ChromaDB, killzones, filtros bypass)
+
+2. **Lanzamiento:** `startBacktest()` en `backtest-feed.ts` envía un mensaje WebSocket al bridge.
+
+3. **Obtención de datos:** `DataLayer.get_historical_data()` descarga velas del rango solicitado de MT5 usando `mt5.copy_rates_range()`. También descarga velas H4 extendidas (5 días antes del rango) para el cálculo de anclaje.
+
+4. **Motor de simulación (`SimEngine.run()`):** Loop secuencial sobre cada vela del DataFrame:
+   - **Indicadores:** Calcula EMA(9), EMA(21), RSI(14), MACD(12,26,9), ATR(14) sobre una ventana deslizante de 150 velas.
+   - **Anclaje H4:** Usa `get_anchor_candle_params()` y `find_anchor_candle()` del módulo `crt_logic.py` (las mismas funciones que el scanner live).
+   - **Detección de sweep:** `check_sweep()` compara precio contra CRT High/Low.
+   - **Validación Capa 1:** `validate_hard_rules()` aplica los 5 filtros secuenciales (horario, spread, ATR, mecha, dimensión) con la config recibida.
+   - **Validación ChromaDB:** `validate_market_context()` con retry de hasta 3 intentos y sleep de 1s entre fallos.
+   - **Gestión de posiciones:** Evalúa SL/TP hit contra high/low de cada vela.
+   - **Cálculo de equity flotante:** En cada vela recalcula PnL flotante.
+   - **Streaming:** Emite mensajes `backtest_candle`, `backtest_trade`, `backtest_equity`, `backtest_progress` vía WebSocket.
+
+5. **Enrutamiento de mensajes:** El socket principal detecta el prefijo `backtest_` y enruta al `backtest-store.ts` sin contaminar el `trading-store.ts` (datos live).
+
+6. **Finalización:** `ResultsStreamer.calculate_metrics()` calcula métricas y `write_markdown_log()` genera un reporte `.md` en `backtest_logs/`.
+
+#### Cálculo de Métricas (`ResultsStreamer`)
+
+| Métrica | Fórmula |
+|---------|---------|
+| **Win Rate** | `(trades_ganadores / total_trades) × 100` |
+| **Profit Factor** | `gross_profit / gross_loss` (≥1.5 = bueno) |
+| **Max Drawdown** | `max((peak - equity) / peak × 100)` sobre toda la curva |
+| **Sharpe Ratio** | `(avg_return / std_return) × √252` (simplificado, anualizado) |
+| **Trades sin ChromaDB** | Cuenta de trades donde ChromaDB falló (3 reintentos agotados) |
+
+### Qué se Aprecia en la Interfaz
+
+| Elemento UI | Componente | Qué muestra |
+|-------------|-----------|-------------|
+| **Panel de parámetros (izq)** | `BacktestPanel.tsx` | Selector de símbolo, temporalidad, rango de fechas, lotaje, TP/SL, umbral ChromaDB. Botones INICIAR/DETENER/LIMPIAR |
+| **Barra de progreso** | `BacktestPanel.tsx` | Barra animada con conteo vela actual / total. Aparece solo durante ejecución |
+| **Gráfico de velas simulado** | `BacktestChart.tsx` | Lightweight Charts renderizando velas históricas con marcadores de trades (flechas de entrada/salida) |
+| **KPIs en tarjetas** | `MetricsPanel.tsx` | 5 tarjetas: Win Rate, Profit Factor, Max Drawdown, Sharpe Ratio, Total Trades. Con coloreado semántico (verde ≥ umbral, rojo < umbral) |
+| **Curva de Equity (SVG)** | `EquityCurveChart.tsx` | Gráfico SVG con gradiente de área bajo la línea. Muestra balance actual, máximo y mínimo dinámicos. Líneas de grid punteadas |
+| **Registro de operaciones** | `TradeLog.tsx` | Tabla scrolleable con cada trade: tipo, precio entrada/salida, PnL, estado ChromaDB (✅/⚠️), razón de aprobación/rechazo |
+| **Exportar resultados** | `BacktestExport.tsx` | Botón para descargar las métricas y operaciones |
+| **Mensaje de error** | `BacktestPanel.tsx` | Caja roja con detalle del error si `status === "error"` |
+
+> **Nota de Layout:** En modo BACKTEST, el `LeftSidebar` estándar, `RightSidebar`, y `BottomPanel` se ocultan (`hidden`). Se reemplaza el sidebar izquierdo por `BacktestPanel` y el área central muestra `BacktestChart` + panel inferior con métricas.
+
+### Estado Actual: ✅ Funcional (MVP)
+
+El motor de backtesting está operativo. Descarga datos de MT5, simula el scanner CRT completo incluyendo validación ChromaDB, genera métricas y reportes Markdown, y renderiza resultados en el frontend.
+
+### Pendiente en BACKTEST
+| Funcionalidad | Estado | Detalle |
+|---------------|--------|---------|
+| Optimizador de parámetros (Grid Search) | 🔶 Backend listo, sin UI | `optimizer.py` implementa `grid_search()` con combinaciones de TP/SL/lotaje. Usa `SimEngine` simplificado sin ChromaDB. Falta panel de UI para configurar la grilla y visualizar resultados |
+| Heatmap de resultados | ❌ No implementado | Visualizar resultados del Grid Search como mapa de calor TP vs SL con color = Profit Factor |
+| Walk-forward analysis | ❌ No implementado | Dividir datos en ventanas in-sample/out-sample para validar robustez |
+| Multi-símbolo simultáneo | ❌ No implementado | Ejecutar backtest en paralelo sobre múltiples pares |
+| Comparación de configuraciones | ❌ No implementado | Overlay de curvas de equity de diferentes runs para comparar lado a lado |
+| Velocidad de reproducción ajustable | ❌ No implementado | El delay actual es fijo (`asyncio.sleep(0.005)`). Falta slider de velocidad en UI (1x, 10x, 100x, máxima) |
+| Deslizamiento y comisiones | ❌ No implementado | El motor no simula slippage ni comisiones del broker. Spread se mockea a 15 puntos fijos |
+
+---
+
+## 🟥 MODO LIVE — Ejecución Real con Dinero
+
+### Propósito
+Ejecutar la estrategia CRT de forma autónoma sobre una cuenta real (o demo) de MetaTrader 5, abriendo y cerrando posiciones con dinero real, con protecciones de riesgo activas.
+
+### Cómo Funciona Técnicamente
+
+#### Flujo Completo de una Operación Live
+
+```
+                        ┌──────────────────────────────────────┐
+                        │  MT5 Terminal (Broker conectado)      │
+                        └───────┬──────────────────────────────┘
+                                │ MetaTrader5 Python package
+                                ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│  mt5_bridge.py                                                           │
+│                                                                          │
+│  ┌─────────────────┐   ┌──────────────────────┐   ┌──────────────────┐ │
+│  │ tick_broadcaster │   │ strategy_scanner_task │   │ feedback_loop    │ │
+│  │ (100ms / 10Hz)   │   │ (1Hz)                │   │ (cada 5s)        │ │
+│  │                  │   │                      │   │                  │ │
+│  │ • Lee bid/ask    │   │ FASE 1: Anclaje H4   │   │ • Consulta deals │ │
+│  │ • Risk Guard     │   │ FASE 2: Rangos CRT   │   │   cerrados       │ │
+│  │ • Emite "tick"   │   │ FASE 3: Sweep detect │   │ • Clasifica W/L  │ │
+│  │                  │   │ FASE 4: Hard Rules   │   │ • Registra en    │ │
+│  │                  │   │ FASE 5: ChromaDB     │   │   ChromaDB       │ │
+│  │                  │   │ FASE 6: Ejecución    │   │ • Emite history  │ │
+│  └──────┬──────────┘   └──────────┬───────────┘   └──────────────────┘ │
+│         │                         │                                      │
+│         │   ws://127.0.0.1:8000   │                                      │
+└─────────┼─────────────────────────┼──────────────────────────────────────┘
+          │                         │
+          ▼                         ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│  Frontend (Next.js)                                                       │
+│                                                                          │
+│  mock-feed.ts (normalizador)                                             │
+│      ▼                                                                   │
+│  trading-store.ts (Zustand + localStorage)                               │
+│      ▼                                                                   │
+│  ┌──────────┐  ┌────────────┐  ┌─────────────┐  ┌──────────────────┐   │
+│  │PriceChart│  │AccountStats│  │PositionsTable│  │HistoryPanel      │   │
+│  │(velas +  │  │(balance,   │  │(posiciones   │  │(trades cerrados  │   │
+│  │ CRT lines│  │ equity,    │  │ abiertas con │  │ con ChromaDB     │   │
+│  │ en vivo) │  │ drawdown)  │  │ PnL flotante │  │ insights)        │   │
+│  └──────────┘  └────────────┘  └──────┬──────┘  └──────────────────┘   │
+│                                       │                                  │
+│                            ModifySLTPModal (editar SL/TP en vivo)       │
+│                            Cierre manual de posiciones                   │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Motor de Ejecución (Las 6 Fases del Scanner)
+
+El bot ejecuta las 6 fases secuenciales a 1Hz mediante `strategy_scanner_task`:
+
+##### FASE 1 — Selección de la Vela de Anclaje H4
+
+**Código:** `update_reference_ranges()` en `mt5_bridge.py`
+
+El bot selecciona una vela H4 **cerrada y específica** según calendario basado en hora Canaria (`Atlantic/Canary`):
 
 | Hora actual (Canary) | Vela H4 que busca (inicio) | Etiqueta |
-|---------------------|--------------------------|---------|
+|---------------------|--------------------------|---------| 
 | 00:00 – 05:59 | 10:00 del **día anterior** | `14:00 Anchor` |
 | 06:00 – 09:59 | 02:00 del mismo día | `06:00 Anchor` |
 | 10:00 – 13:59 | 06:00 del mismo día | `10:00 Anchor` |
@@ -82,7 +292,7 @@ El bot **no usa la vela H4 anterior genérica**. Selecciona una vela H4 **cerrad
 
 ---
 
-### FASE 2 — Cálculo de Rangos CRT
+##### FASE 2 — Cálculo de Rangos CRT
 
 Una vez seleccionada la vela de anclaje se extraen 3 niveles de precio:
 
@@ -96,9 +306,9 @@ Estos valores se almacenan en `anchor_ranges` y se envían al frontend como lín
 
 ---
 
-### FASE 3 — Detección del Barrido (Sweep)
+##### FASE 3 — Detección del Barrido (Sweep)
 
-**Código:** [`strategy_scanner_task()` L636-641](mt5_bridge.py#L636)
+**Código:** `strategy_scanner_task()` L636-641
 
 Comparación tick a tick (1Hz) del precio actual contra los extremos del rango H4:
 
@@ -132,13 +342,13 @@ CRT_L ══════════════════ ← Mínimo de la v
 
 ---
 
-### FASE 4 — Filtros de Capa 1 (Hard Rules)
+##### FASE 4 — Filtros de Capa 1 (Hard Rules)
 
-**Código:** [`validate_hard_rules()`](mt5_bridge.py#L264)
+**Código:** `validate_hard_rules()` en `crt_logic.py`
 
 5 filtros secuenciales. Si cualquiera falla → señal `DISMISSED`. El anti-spam evita repetir el mismo rechazo más de 1 vez por minuto.
 
-#### 4.1 Filtro de Horario
+**4.1 Filtro de Horario**
 
 Verifica que la hora actual (en `Atlantic/Canary`) esté dentro de:
 
@@ -168,7 +378,7 @@ Verifica que la hora actual (en `Atlantic/Canary`) esté dentro de:
 
 ---
 
-#### 4.2 Filtro de Spread
+**4.2 Filtro de Spread**
 
 ```
 spread_pips = current_spread_points / 10.0
@@ -181,7 +391,7 @@ Condición 2: current_spread_points ≤ max_spread_points  ← límite absoluto 
 
 ---
 
-#### 4.3 Filtro de ATR Mínimo
+**4.3 Filtro de ATR Mínimo**
 
 ```
 ltf_atr = ATR(M1, período 14)   ← True Range clásico convertido a pips
@@ -193,7 +403,7 @@ SI ltf_atr < min_atr_pips → RECHAZAR
 
 ---
 
-#### 4.4 Filtro de Ratio Mecha CRT
+**4.4 Filtro de Ratio Mecha CRT**
 
 Evalúa la **última vela M1**, no la vela de anclaje H4:
 
@@ -210,7 +420,7 @@ Un cuerpo M1 grande sugiere continuación (impulso), no reversión (trampa CRT).
 
 ---
 
-#### 4.5 Filtro de Dimensión ⭐
+**4.5 Filtro de Dimensión ⭐**
 
 Evalúa si el **rango de la vela H4 de anclaje** es suficientemente grande.
 
@@ -242,9 +452,9 @@ SI range_size_pips < 20.0 puntos → RECHAZAR
 
 ---
 
-### FASE 5 — Validación Semántica Capa 2/3 (ChromaDB)
+##### FASE 5 — Validación Semántica Capa 2/3 (ChromaDB)
 
-**Código:** [`validate_market_context()`](context_engine.py#L94)
+**Código:** `validate_market_context()` en `context_engine.py`
 
 Si la Capa 1 aprueba, se construye una consulta semántica:
 
@@ -270,7 +480,7 @@ Esto crea un **aprendizaje por refuerzo negativo**: un trade perdedor bloquea se
 
 ---
 
-### FASE 6 — Ejecución y Gestión Post-Trade
+##### FASE 6 — Ejecución y Gestión Post-Trade
 
 **Cálculo de SL y TP:**
 ```python
@@ -300,6 +510,37 @@ drawdown = balance_inicial_del_día − equity_actual
 SI drawdown ≥ 4.5% del balance → Cierre de pánico + bloqueo total
 SI drawdown ≥ 8.0% del balance → Cierre de pánico + bloqueo total
 ```
+
+### Qué se Aprecia en la Interfaz (Modo LIVE)
+
+El modo LIVE comparte los mismos componentes visuales que DEMO, pero con **funcionalidad completa**:
+
+| Elemento UI | Componente | Comportamiento en LIVE |
+|-------------|-----------|----------------------|
+| **Gráfico de velas** | `PriceChart.tsx` | Velas en tiempo real + líneas CRT dinámicas + **marcadores de entradas/salidas reales** |
+| **Estadísticas de cuenta** | `AccountStats.tsx` | Balance y equity **reales del broker** actualizados a 10Hz. Drawdown bars con datos reales. Badge de estado de la cuenta |
+| **Posiciones abiertas** | `PositionsTable.tsx` | **Posiciones reales** con PnL flotante actualizado en tiempo real. Acciones: cerrar posición, modificar SL/TP via `ModifySLTPModal` |
+| **Historial de trades** | `HistoryPanel.tsx` | Trades reales cerrados con ChromaDB insights. Estadísticas acumuladas (W/L, Win Rate, Net pips) |
+| **Configuración CRT** | `LeftSidebar.tsx` | Cambios se envían en tiempo real via WebSocket `BOT_CONFIG_UPDATE` al bridge |
+| **Risk Guard visual** | `AccountStats.tsx` | Barras de drawdown cambian a rojo cuando `percent > 80%` |
+| **Botón de pánico** | `LeftSidebar.tsx` | Detener bot inmediatamente |
+
+### Estado Actual: ✅ Funcional
+
+El modo LIVE es plenamente operativo. El bot ejecuta órdenes reales en MT5 cuando `BOT_ACTIVE = True`, gestiona posiciones, evalúa drawdown en tiempo real y alimenta el feedback loop de ChromaDB.
+
+### Pendiente en LIVE
+| Funcionalidad | Estado | Detalle |
+|---------------|--------|---------|
+| Trailing Stop dinámico | ❌ No implementado | `BotConfig.trailing_stop` se guarda pero no se usa. Debería mover SL a breakeven y luego seguir precio |
+| Cierre parcial en Equilibrium | ❌ No implementado | `BotConfig.partial_close` se guarda pero no se usa. Debería cerrar X% del volumen cuando precio toque EQ |
+| Confirmación TBS/TWS | ❌ No implementado | El sweep actual es de 1 tick. Falta confirmar cierre fuera/dentro del rango (TBS) y validar mecha ≥50% (TWS) |
+| Confluencia M1/M15 | ❌ No implementado | `hybrid_m1_m15_confluence` se guarda pero no evalúa divergencias entre temporalidades |
+| SMT Divergence Check | ❌ No implementado | `smt_divergence_check` se guarda pero no compara pares correlacionados (ej: EURUSD vs DXY) |
+| Max posiciones real | ❌ No implementado | `max_positions = 3` existe pero el scanner solo comprueba `> 0` |
+| Panel de evaluación en tiempo real | ❌ No implementado | Dashboard visual que muestre las 6 fases del scanner con semáforo live |
+| Log de señales rechazadas | ❌ Parcial | Las señales `DISMISSED` se emiten como `signal_evaluation` pero no se persisten ni se visualizan en tabla dedicada |
+| Alertas sonoras | ❌ No implementado | Sonido al abrir/cerrar operaciones o al activar Risk Guard |
 
 ---
 
@@ -345,21 +586,281 @@ SI drawdown ≥ 8.0% del balance → Cierre de pánico + bloqueo total
 
 ---
 
-## 🚧 Funcionalidades Definidas pero NO Implementadas
+## 🐢 Implementación CRT Real (TBS/TWS) — ✅ IMPLEMENTADO
 
-> Los siguientes parámetros están definidos en `BotConfig` o en las reglas, pero no tienen lógica activa en el scanner:
+> Lógica institucional de barrido implementada en `crt_logic.py` y orquestada por `strategy_scanner_task()` en `mt5_bridge.py`. Activable mediante flags de `BotConfig`.
+
+### `classify_sweep_type()` — Clasificación TBS/TWS ✅
+
+Función pura en `crt_logic.py` (L211). Evalúa la **vela_2** (la que barre) contra la **vela_3** (confirmación) respecto a CRT High/Low:
+
+```
+body_ratio = |close − open| / (high − low)   ← cuerpo de vela_2 sobre su rango
+```
+
+| Condición | Tipo | Confianza |
+|-----------|------|-----------|
+| Cuerpo cruza el nivel **Y** body_ratio < 20% | **TBS** | **1.00** |
+| Cuerpo cruza el nivel **Y** body_ratio ≥ 20% | **TBS** | **0.65** |
+| Solo la mecha cruza **Y** body_ratio < 20% | **TWS** | **0.75** |
+| Solo la mecha cruza **Y** body_ratio ≥ 20% | **TWS** | **0.50** |
+| La mecha no cruza **o** vela_3 no recupera dentro del rango | **INVALID** | 0.00 |
+
+> La **regla del 20%** (`body_ratio < 0.20`) distingue un barrido limpio (mecha de rechazo) de un cierre impulsivo. TBS = cuerpo cierra fuera y vuelve dentro (A+); TWS = solo mecha penetra.
+
+### Buffer `_sweep_pending` — Confirmación por Vela 3 ✅
+
+`mt5_bridge.py` mantiene un dict `_sweep_pending` (L163). Cuando se detecta un sweep con `require_candle_confirmation` activo (L794):
+1. Se almacena `{direction, vela_2, crt_high, crt_low, timestamp}` indexado por símbolo.
+2. En el siguiente ciclo, se evalúa la **vela_3 candidata** con `classify_sweep_type()`.
+3. **Timeout de 180s** (L739): si la vela 3 no confirma a tiempo, el pendiente se descarta.
+
+### `calculate_dynamic_sl()` — SL detrás de la mecha ✅
+
+`crt_logic.py` L246. SL colocado detrás del extremo de la mecha de vela_2 + **buffer de 1.5 pips**:
+```
+BUY:  SL = vela_2.low  − 1.5×pip_value
+SELL: SL = vela_2.high + 1.5×pip_value
+```
+Usado en el scanner cuando `use_dynamic_sl` está activo (L916).
+
+### `calculate_crt_targets()` — TP1/TP2 ✅
+
+`crt_logic.py` L255. `TP1 = EQ` (equilibrium, 50% del rango), `TP2 = extremo opuesto` (100%). Usado cuando `use_crt_targets` está activo (L926).
+
+### `check_smt_divergence()` — Divergencia SMT ✅
+
+`crt_logic.py` L241. `True` si el par primario barrió un nivel y el correlacionado **no** (divergencia institucional EURUSD/GBPUSD). Aplicado en el scanner cuando `smt_divergence_enabled` está activo (L845-863); si no hay divergencia → señal `DISMISSED`.
+
+### Cierre parcial en EQ + SL a breakeven ✅
+
+`mt5_bridge.py` L1094-1118. Cuando `partial_close_at_eq` está activo y el precio alcanza EQ:
+- Cierra `partial_close_pct`% del volumen (comment `CRT_EQ_PARTIAL`).
+- Mueve el SL de la posición restante a **breakeven** (precio de entrada).
+
+### Multiplicadores de lotaje TBS/TWS ✅
+
+`mt5_bridge.py` L935-939. El lotaje base se multiplica según el tipo de sweep clasificado:
+- **TBS → `model_tbs_risk_multiplier`** (default **1.0x** — máxima convicción).
+- **TWS → `model_tws_risk_multiplier`** (default **0.5x** — convicción reducida).
+
+### Flags de `BotConfig` que controlan cada feature
+
+| Flag | Default | Controla |
+|------|---------|----------|
+| `require_candle_confirmation` | (ver dataclass) | Buffer `_sweep_pending` + clasificación TBS/TWS |
+| `use_dynamic_sl` | — | SL detrás de mecha |
+| `use_crt_targets` | — | TP1=EQ / TP2=extremo opuesto |
+| `smt_divergence_enabled` | — | Filtro de divergencia SMT |
+| `partial_close_at_eq` | `false` | Cierre parcial en EQ + breakeven |
+| `partial_close_pct` | `50` | % de volumen a cerrar en parcial |
+| `model_tbs_risk_multiplier` | `1.0` | Lotaje en sweeps TBS |
+| `model_tws_risk_multiplier` | `0.5` | Lotaje en sweeps TWS |
+
+> Todas las features dependen de `CRT_LOGIC_AVAILABLE` (import seguro de `crt_logic.py`). Si el módulo no carga, el scanner degrada al comportamiento básico de 1 tick sin romperse.
+
+---
+
+## 🛠️ Gaps Corregidos (Junio 2026)
+
+| Corrección | Estado | Detalle |
+|------------|--------|---------|
+| Componente `ScannerLog` (panel de señales) | ✅ IMPLEMENTADO | `src/components/scanner/ScannerLog.tsx` lee `s.scannerSignals`, ahora presente en `trading-store.ts` (campo `scannerSignals` + acción `addScannerSignal`, cap 100). El handler `scanner_signal` en `mock-feed.ts` traduce los eventos del backend (`DETECTED`/`DISMISSED`/`EXECUTED`/`FAILED`) a la señal del store. |
+| Handler `risk_guard_alert` en frontend | ❌ PENDIENTE | El backend emite `risk_guard_alert` (L1287) pero `mock-feed.ts` no lo procesa todavía. |
+| Handler `anchor_update` en frontend | ❌ PENDIENTE | No hay branch `anchor_update` en `mock-feed.ts` (los handlers actuales son `bot_status`, `account`, `trade_result`, `positions`, `history`, `tick`, `history_full`, `history_init`, `history_update`). |
+| Risk Guard conectado a `maxDailyLoss` de la UI | ✅ IMPLEMENTADO | `mt5_bridge.py` L1255-1271: usa `bot_config.max_daily_loss` si `> 0`, con **fallback** a `config_crt.json → max_daily_loss_pct`. Total = 2× diario por convención. |
+| `maxPositions` validado contra posiciones totales | ✅ IMPLEMENTADO | L692-697: cuenta `mt5.positions_get()` (todas) y bloquea el scanner si `total_open >= max_positions` (antes solo comprobaba `> 0`). |
+| Import de `crt_logic.py` con flag | ✅ IMPLEMENTADO | L31-35: `try/except` define `CRT_LOGIC_AVAILABLE`; toda la lógica CRT avanzada se condiciona a ese flag. |
+| Filtro de posiciones manuales en el scanner | 🔶 PARCIAL | El scanner salta el símbolo si **cualquier** posición está abierta para ese par (L711-713), incluidas las manuales. La clasificación bot/manual sí distingue por comment `CRT` en `send_trade_history()` (L1391), pero el bloqueo del scanner **no** filtra manuales por comment. |
+| Timezone unificado vía `_to_canary()` | ✅ IMPLEMENTADO | `mt5_bridge.py` L22: helper `_to_canary()` (pytz `Atlantic/Canary`) usado en validaciones horarias del scanner (L594, L633) y killzones. |
+
+---
+
+## 📊 Sistema de Historial Real y Métricas — ✅ IMPLEMENTADO
+
+### `send_trade_history()` (backend) ✅
+
+`mt5_bridge.py` L1367. Fuente: `mt5.history_deals_get()` (últimos 30 días). Por cada deal cerrado:
+- Empareja el deal de cierre con su deal de apertura (`position_id`).
+- **Clasifica origen** por comment: `bot` (empieza con `CRT` o contiene `scanner`), `bot_partial` (`CRT_EQ_PARTIAL`), o `manual`.
+- Calcula **pips** (según `DEAL_TYPE` y pip_value del símbolo) y **duración** (cierre − apertura).
+- Parsea `crt_meta` del comment enriquecido.
+- Recupera SL/TP desde `mt5.history_orders_get()`.
+
+Enviado como `history_full` al conectar un cliente y en **broadcast cada 30s** (feedback loop, 6 iteraciones × 5s).
+
+### Métricas agregadas ✅
+
+Calculadas en `send_trade_history()` y enviadas en el campo `metrics`: `total`, `wins`, `losses`, `win_rate`, `total_profit`, `total_pips`, `avg_win`, `avg_loss`, `profit_factor`, `avg_duration_s`, `max_dd_trade`, `bot_trades`, `manual_trades`, `tbs_count`, `tbs_wr`, `tws_count`, `tws_wr`.
+
+### Comment enriquecido en órdenes ✅
+
+`_build_crt_comment()` (`mt5_bridge.py` L653) genera el comment de las órdenes del bot, máx. 31 chars (límite MT5):
+```
+CRT|sweep:TBS|conf:1.00|kz:london
+```
+Incluye el tipo de sweep, la confianza y la killzone activa (`get_active_killzone_name()`). El parser en `send_trade_history()` lo reconstruye en `crt_meta`.
+
+### Tabla del footer con filtros ✅
+
+`src/components/history/HistoryTable.tsx`: lee `tradeHistory` y `tradeMetrics` del store. Tabs **Todos / Bot / Manual** (filtra por `origin`). Columnas: Ticket, Símbolo, Dir, Vol, P.Apertura, P.Cierre, Pips, P/L Neto, Duración, Origen (badge), Hora cierre. Tarjetas de métricas (Win Rate, Profit Factor, Total P/L, Pips, TBS WR, TWS WR) cuando hay métricas.
+
+### Exportación para análisis ✅
+
+Dos botones en `HistoryTable.tsx`:
+- **"Copiar para IA"** → JSON compacto formato `crt-bot-export-v1` (claves cortas: `tk`, `sym`, `dir`, `pnl`, `pips`, `orig`, `crt`…) al portapapeles.
+- **"Copiar resumen"** → texto plano con totales, WR, PF, P/L y desglose TBS/TWS.
+
+---
+
+## 🧬 Arquitectura Pluggable IStrategy — 🔶 PARCIAL (registrada, no conectada)
+
+> Definida en `strategies/base_strategy.py` y `strategies/crt_strategy.py`. **El scanner aún NO la usa** — sigue ejecutando la lógica inline de `strategy_scanner_task()`. Es la base para una migración futura.
+
+- **`IStrategy`** (ABC): método abstracto `evaluate(ctx) -> StrategySignal` y hook `on_trade_closed(profit, setup_context)`.
+- **`MarketContext`** (dataclass): symbol, bid, ask, spread_points, atr_pips, crt_high/low, eq, anchor_time, velas M1.
+- **`StrategySignal`** (dataclass): approved, direction, reason, sweep_type, confidence, sl_price, tp1/tp2_price, lot_multiplier.
+- **`STRATEGY_REGISTRY`** + decorador **`@register_strategy`**: registro por `cls.name`.
+- **`CRTStrategy`** (`name="crt"`): primera implementación — sweep H4 + `classify_sweep_type()` + SL dinámico + targets EQ. Registrada vía decorador.
+
+**Estado:** ✅ registrada en el registry · ❌ NO invocada por el scanner (pendiente de migración).
+
+---
+
+## 🧭 Discriminación Direccional ChromaDB — ✅ IMPLEMENTADO
+
+**Problema original:** las consultas semánticas no distinguían dirección, así que un **LOSS de BUY** podía bloquear una señal **SELL** similar (y viceversa), contaminando el aprendizaje.
+
+**Solución** (`context_engine.py`):
+- En las **queries** (L105-107): la dirección se inyecta como **token repetido de alto peso** — `"BUY BUY BUY | {setup_name}"` — para que el embedding pondere fuertemente la dirección.
+- En **`add_trade_experience()`** (L168-174): al registrar el resultado de un trade, el setup se almacena con el mismo token direccional triplicado (`setup_initial_weighted`).
+
+Esto separa el espacio semántico por dirección: los LOSS de BUY ya no atraen consultas SELL.
+
+---
+
+## 🧩 Estructura Técnica de la Metodología CRT (por Módulo)
+
+### Distribución del Código CRT
+
+La lógica CRT se distribuye en 3 módulos Python que separan responsabilidades:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  crt_logic.py  (Lógica pura, sin side effects)              │
+│  ─────────────────────────────────────────────              │
+│  • get_anchor_candle_params()  — Calendario de anclaje      │
+│  • find_anchor_candle()        — Búsqueda H4 específica     │
+│  • is_in_active_killzone()     — Validación de horario UTC  │
+│  • check_sweep()               — Detección bid>high/ask<low │
+│  • validate_hard_rules()       — 5 filtros secuenciales     │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ importado por
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  mt5_bridge.py  (Orquestador con side effects)              │
+│  ─────────────────────────────────────────────              │
+│  • tick_broadcaster()          — Precio + Risk Guard (10Hz) │
+│  • strategy_scanner_task()     — Ciclo de evaluación (1Hz)  │
+│  • update_reference_ranges()   — Actualiza anclaje H4       │
+│  • feedback_loop_task()        — Aprendizaje automático (5s)│
+│  • try_order_send()            — Envío de órdenes IOC/FOK   │
+│  • WebSocket server            — Comunicación con frontend  │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ importa
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  context_engine.py  (Motor semántico)                        │
+│  ─────────────────────────────────────────────               │
+│  • init_chroma()               — Inicializa ChromaDB local  │
+│  • load_curated_rules()        — Carga crt_rules_curated.md │
+│  • validate_market_context()   — Query semántico Capa 2/3   │
+│  • register_trade_feedback()   — Registra W/L en ChromaDB   │
+│  │                                                           │
+│  └── ChromaDB (chroma_db/)     — Colección crt_knowledge    │
+│      └── SentenceTransformers  — all-MiniLM-L6-v2           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Reutilización entre Modos
+
+| Función | DEMO | BACKTEST | LIVE |
+|---------|------|----------|------|
+| `get_anchor_candle_params()` | ✅ | ✅ (via `backtesting_engine.py`) | ✅ |
+| `find_anchor_candle()` | ✅ | ✅ | ✅ |
+| `check_sweep()` | ✅ (evalúa, no opera) | ✅ | ✅ |
+| `validate_hard_rules()` | ✅ (evalúa, no opera) | ✅ | ✅ |
+| `validate_market_context()` | ✅ (evalúa, no opera) | ✅ (con retry 3x) | ✅ |
+| `try_order_send()` | ❌ (bloqueado) | ❌ (simulado en `SimEngine`) | ✅ |
+| `feedback_loop_task()` | ❌ (sin trades) | ❌ (mock en `ResultsStreamer`) | ✅ |
+| Risk Guard | ✅ (monitorea) | ❌ (no aplica) | ✅ (cierre de pánico) |
+
+---
+
+## 🏗️ Mapa de Componentes Frontend
+
+### Componentes Compartidos (visibles en DEMO + LIVE)
+
+| Componente | Archivo | Responsabilidad |
+|-----------|---------|----------------|
+| `Header` | `layout/Header.tsx` | Barra superior con logo, selectores, modos, indicador de conexión MT5 |
+| `LeftSidebar` | `layout/LeftSidebar.tsx` | Modal flotante arrastrable con TODOS los parámetros del bot. Draft persistente en Zustand |
+| `RightSidebar` | `layout/RightSidebar.tsx` | Watchlist de símbolos y resumen de mercado |
+| `BottomPanel` | `layout/BottomPanel.tsx` | Pestañas: Posiciones activas + Historial |
+| `PriceChart` | `chart/PriceChart.tsx` | Gráfico principal Lightweight Charts con líneas CRT, marcadores de trades |
+| `SymbolSelector` | `chart/SymbolSelector.tsx` | Dropdown de cambio de símbolo |
+| `TimeframeSelector` | `chart/TimeframeSelector.tsx` | Botones de temporalidad |
+| `IndicatorMenu` | `chart/IndicatorMenu.tsx` | Menú de indicadores técnicos |
+| `AccountStats` | `dashboard/AccountStats.tsx` | Balance, equity, drawdown con barras y badge |
+| `PositionsTable` | `dashboard/PositionsTable.tsx` | Tabla de posiciones abiertas con PnL flotante |
+| `HistoryPanel` | `dashboard/HistoryPanel.tsx` | Historial con ChromaDB insights expandibles |
+| `TradeNotifications` | `dashboard/TradeNotifications.tsx` | Toasts de notificación |
+
+### Componentes Exclusivos de BACKTEST
+
+| Componente | Archivo | Responsabilidad |
+|-----------|---------|----------------|
+| `BacktestPanel` | `backtest/BacktestPanel.tsx` | Sidebar de configuración: símbolo, temporalidad, fechas, parámetros, botones de control |
+| `BacktestChart` | `backtest/BacktestChart.tsx` | Gráfico de velas simuladas con marcadores de trades del backtest |
+| `MetricsPanel` | `backtest/MetricsPanel.tsx` | 5 tarjetas KPI con coloreado semántico |
+| `EquityCurveChart` | `backtest/EquityCurveChart.tsx` | Curva de equity SVG con gradiente y labels dinámicos |
+| `TradeLog` | `backtest/TradeLog.tsx` | Tabla de todas las operaciones del backtest con detalle ChromaDB |
+| `BacktestExport` | `backtest/BacktestExport.tsx` | Exportación de resultados |
+
+### Stores (Estado Global)
+
+| Store | Archivo | Ámbito |
+|-------|---------|--------|
+| `useTradingStore` | `store/trading-store.ts` | Estado de mercado real: ticks, posiciones, historial, cuenta, config del bot |
+| `useBacktestStore` | `store/backtest-store.ts` | Estado aislado de backtesting: velas simuladas, trades, equity, métricas |
+| `useModeStore` | `store/mode-store.ts` | Modo activo: DEMO / BACKTEST / LIVE |
+| `useChartStore` | `store/chart-store.ts` | Símbolo y temporalidad seleccionados |
+| `useStrategyStore` | `store/strategy-store.ts` | Estado de la estrategia activa |
+
+---
+
+## 🚧 Parámetros: Activos vs Fantasma
+
+### ✅ Ya implementados (antes fantasma)
 
 | Funcionalidad | Dónde se define | Estado |
 |---------------|----------------|--------|
-| **TBS (Turtle Body Soup)** — cierre fuera/dentro del rango | `crt_rules_curated.md` L30 | ❌ No implementado |
-| **TWS (Turtle Wick Soup)** — mecha de rechazo ≥50% | `crt_rules_curated.md` L31 | ❌ No implementado |
+| **TBS / TWS** — clasificación de barrido | `crt_logic.classify_sweep_type()` | ✅ Implementado |
+| **Cierre parcial en EQ** | `BotConfig.partial_close_at_eq` / `partial_close_pct` | ✅ Implementado (L1094) |
+| **SMT Divergence Check** | `BotConfig.smt_divergence_enabled` | ✅ Implementado (L845) |
+| **Multiplicadores TBS/TWS** | `BotConfig.model_tbs/tws_risk_multiplier` | ✅ Implementado (L935) |
+| **Max posiciones (límite real)** | `BotConfig.max_positions` | ✅ Implementado (L692, cuenta totales) |
+| **Max daily loss desde UI** | `BotConfig.max_daily_loss` | ✅ Implementado (L1255, fallback a JSON) |
+| **SL dinámico + targets CRT** | `BotConfig.use_dynamic_sl` / `use_crt_targets` | ✅ Implementado (L916/L926) |
+
+### ❌ Aún fantasma (sin lógica activa)
+
+| Funcionalidad | Dónde se define | Estado |
+|---------------|----------------|--------|
+| **Selector de estrategia** | `STRATEGY_REGISTRY` / `useStrategyStore` | ❌ Registry existe, scanner no lo usa |
 | **Trailing Stop** | `BotConfig.trailing_stop` | ❌ Se guarda, no se usa |
-| **Cierre parcial en EQ** | `BotConfig.partial_close` | ❌ Se guarda, no se usa |
-| **Confluencia M1/M15** | `BotConfig.hybrid_m1_m15_confluence` | ❌ Se guarda, no se usa |
-| **SMT Divergence Check** | `BotConfig.smt_divergence_check` | ❌ Se guarda, no se usa |
-| **Multiplicadores TBS/TWS** | `BotConfig.model_tbs/tws_risk_multiplier` | ❌ Se guardan, no se usan |
+| **Confluencia M1/M15** | `BotConfig.hybrid_m1_m15_confluence` | ❌ Se guarda, no se evalúa |
 | **ATR body ratio** | `config_crt.json → min_body_to_atr_ratio` | ❌ Definido en JSON, no evaluado |
-| **Max posiciones (límite real)** | `BotConfig.max_positions = 3` | ❌ El scanner solo comprueba `> 0` |
 
 ---
 
@@ -376,6 +877,12 @@ El socket activo, las flags de suscripción y las variables clave de Zustand (`b
 
 ### 4. Sistema de Bypass Dinámico de Capa 1
 Se implementó un sistema de flags (`disable_spread_filter`, `disable_atr_filter`, `disable_wick_body_filter`, `disable_dimension_filter`) controlables desde el frontend para poder flexibilizar las hard rules sin modificar el código del motor, útil en backtesting manual o en condiciones de mercado atípicas.
+
+### 5. Aislamiento Total de Estado por Modo
+`backtest-store.ts` es completamente independiente de `trading-store.ts`. Los mensajes WebSocket con prefijo `backtest_` se enrutan a handlers separados en `backtest-feed.ts`, evitando contaminación cruzada. Esto permite ejecutar un backtest mientras el feed live sigue activo en segundo plano.
+
+### 6. Separación de Lógica Pura vs Orquestación
+`crt_logic.py` contiene funciones puras sin side effects (no toca MT5 ni ChromaDB directamente), lo que permite reutilizarlas tanto en el scanner live (`mt5_bridge.py`) como en el motor de backtesting (`backtesting_engine.py`) sin duplicación de código.
 
 ---
 
@@ -451,6 +958,19 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 
 ## 🎯 Pendiente / Próximos Pasos
 
-1. **Implementar TBS/TWS real:** El modelo de barrido actual es básico (un tick). Implementar la confirmación de cierre de vela dentro/fuera del rango para TBS, y la validación de mecha de rechazo ≥50% para TWS.
-2. **Activar funcionalidades fantasma:** Trailing stop, cierre parcial en EQ, confluencia M1/M15, SMT divergence y max_positions reales.
-3. **Unificar validación de horario:** Resolver la inconsistencia entre `is_in_active_killzone()` (UTC) y `validate_hard_rules()` (Canary).
+### Prioridad Alta
+1. **Handlers `risk_guard_alert` y `anchor_update` en frontend:** El backend ya los emite; `mock-feed.ts` aún no los procesa (el handler `scanner_signal` ya quedó cableado).
+3. **Migrar el scanner a `IStrategy`:** Conectar `strategy_scanner_task()` a `STRATEGY_REGISTRY` / `CRTStrategy` en vez de la lógica inline. Habilitar el selector de estrategia.
+4. **Filtro de manuales en el bloqueo del scanner:** Hoy cualquier posición abierta (incluida manual) salta el símbolo; filtrar por comment `CRT` para que las manuales no detengan al bot.
+
+### Prioridad Media
+5. **Trailing Stop:** `BotConfig.trailing_stop` se guarda pero no mueve el SL. Implementar breakeven + seguimiento.
+6. **Confluencia M1/M15:** `hybrid_m1_m15_confluence` sin lógica de divergencia entre temporalidades.
+7. **UI del Optimizador:** Panel frontend para `optimizer.py` (grilla, heatmap, mejores combinaciones).
+8. **Panel de evaluación CRT en tiempo real:** Semáforo por fase del scanner.
+
+### Prioridad Baja
+8. **Walk-forward analysis:** Validación de robustez con ventanas in-sample/out-sample.
+9. **Multi-símbolo en backtest:** Ejecución paralela sobre varios pares.
+10. **Alertas sonoras:** Notificaciones de audio para trades y Risk Guard.
+11. **Slippage y comisiones:** Simulación realista de costos de trading en el backtester.

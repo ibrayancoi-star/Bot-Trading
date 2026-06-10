@@ -92,6 +92,13 @@ export interface BotConfig {
   hybridM1M15Confluence: boolean;
   smtDivergenceCheck: boolean;
 
+  // [CRT-IMPL] Flags de la metodología CRT avanzada (TBS/TWS)
+  requireCandleConfirmation: boolean;
+  useDynamicSl: boolean;
+  useCrtTargets: boolean;
+  partialCloseAtEq: boolean;
+  smtDivergenceEnabled: boolean;
+
   // ── Killzones dinámicas ─────────────────────────────
   londonStart:   string;   // "07:00" (UTC)
   londonEnd:     string;   // "10:00" (UTC)
@@ -117,6 +124,62 @@ export interface BotConfig {
   minAmplitudeIndicesPoints:    number;
 }
 
+// [SCANNER-WIRE] Señal emitida por el scanner del bridge
+export interface ScannerSignal {
+  id: string;
+  action: "DETECTED" | "DISMISSED" | "EXECUTED" | "FAILED";
+  symbol: string;
+  direction?: string;
+  price?: number;
+  reason?: string;
+  message?: string;
+  timestamp: number;
+}
+
+// [HISTORY-FIX-1] Tipo para trade del historial real
+export interface HistoryTrade {
+  ticket: number;
+  symbol: string;
+  direction: "BUY" | "SELL";
+  volume: number;
+  open_price: number;
+  close_price: number;
+  open_time: string;
+  close_time: string;
+  duration_s: number;
+  profit: number;
+  pips: number;
+  commission: number;
+  swap: number;
+  net_profit: number;
+  origin: "bot" | "bot_partial" | "manual";
+  comment: string;
+  sl: number;
+  tp: number;
+  crt_meta?: Record<string, string>;
+}
+
+// [HISTORY-FIX-2] Métricas agregadas del historial
+export interface TradeMetrics {
+  total: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_profit: number;
+  total_pips: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number;
+  avg_duration_s: number;
+  max_dd_trade: number;
+  bot_trades: number;
+  manual_trades: number;
+  tbs_count: number;
+  tbs_wr: number;
+  tws_count: number;
+  tws_wr: number;
+}
+
 interface TradingState {
   accountType: "real" | "fondeo" | "demo";
   account: PropAccount;
@@ -138,10 +201,23 @@ interface TradingState {
   // [POSITIONS MODULE]
   tradeHistory: ClosedTrade[];
 
+  // [HISTORY-FIX-1] Historial real de MT5 + métricas agregadas
+  tradeMetrics: TradeMetrics | null;
+
+  // [SCANNER-WIRE] Señales del scanner (panel ScannerLog)
+  scannerSignals: ScannerSignal[];
+
   // Acciones
   setPositions:      (positions: Position[]) => void;
   initHistory:       (trades: ClosedTrade[]) => void;
   appendHistory:     (trade: ClosedTrade) => void;
+
+  // [HISTORY-FIX-1] Acciones del historial real
+  setTradeHistory:   (trades: HistoryTrade[]) => void;
+  setTradeMetrics:   (metrics: TradeMetrics) => void;
+
+  // [SCANNER-WIRE] Añade una señal del scanner (cap 100)
+  addScannerSignal:  (signal: ScannerSignal) => void;
 
   // Actions
   setAccountType: (type: "real" | "fondeo" | "demo") => void;
@@ -220,6 +296,13 @@ export const useTradingStore = create<TradingState>()(
         hybridM1M15Confluence: true,
         smtDivergenceCheck: true,
 
+        // [CRT-IMPL] Flags de la metodología CRT avanzada (default off salvo SMT)
+        requireCandleConfirmation: false,
+        useDynamicSl: false,
+        useCrtTargets: false,
+        partialCloseAtEq: false,
+        smtDivergenceEnabled: false,
+
         londonStart:   "07:00",
         londonEnd:     "10:00",
         newYorkStart:  "12:00",
@@ -259,6 +342,13 @@ export const useTradingStore = create<TradingState>()(
         hybridM1M15Confluence: true,
         smtDivergenceCheck: true,
 
+        // [CRT-IMPL] Flags de la metodología CRT avanzada (default off salvo SMT)
+        requireCandleConfirmation: false,
+        useDynamicSl: false,
+        useCrtTargets: false,
+        partialCloseAtEq: false,
+        smtDivergenceEnabled: false,
+
         londonStart:   "07:00",
         londonEnd:     "10:00",
         newYorkStart:  "12:00",
@@ -285,11 +375,26 @@ export const useTradingStore = create<TradingState>()(
       // [POSITIONS MODULE]
       tradeHistory: [],
 
+      // [HISTORY-FIX-1] Historial real + métricas
+      tradeMetrics: null,
+
+      // [SCANNER-WIRE] Señales del scanner
+      scannerSignals: [],
+
       // [POSITIONS MODULE]
       setPositions:  (positions) => set({ positions }),
       initHistory:   (trades)    => set({ tradeHistory: trades }),
       appendHistory: (trade)     => set((state) => ({
         tradeHistory: [trade, ...state.tradeHistory].slice(0, 500) // cap en 500
+      })),
+
+      // [HISTORY-FIX-1] Reemplaza el historial con datos reales de MT5
+      setTradeHistory: (trades) => set({ tradeHistory: trades as unknown as ClosedTrade[] }),
+      setTradeMetrics: (metrics) => set({ tradeMetrics: metrics }),
+
+      // [SCANNER-WIRE] Prepend señal, cap a 100
+      addScannerSignal: (signal) => set((state) => ({
+        scannerSignals: [signal, ...state.scannerSignals].slice(0, 100),
       })),
 
       setAccountType: (type) => set({ accountType: type }),

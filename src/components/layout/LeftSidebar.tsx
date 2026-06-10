@@ -63,6 +63,13 @@ export function LeftSidebar() {
   const [hybridM1M15Confluence, setHybridM1M15Confluence] = useState<boolean>(true);
   const [smtDivergenceCheck, setSmtDivergenceCheck] = useState<boolean>(true);
 
+  // [CRT-IMPL-6] Nuevos estados locales
+  const [requireCandleConfirmation, setRequireCandleConfirmation] = useState<boolean>(false);
+  const [useDynamicSl, setUseDynamicSl] = useState<boolean>(false);
+  const [useCrtTargets, setUseCrtTargets] = useState<boolean>(false);
+  const [partialCloseAtEq, setPartialCloseAtEq] = useState<boolean>(false);
+  const [smtDivergenceEnabled, setSmtDivergenceEnabled] = useState<boolean>(false);
+
   // Killzones dinámicas
   const [londonStart,  setLondonStart]  = useState<string>("07:00");
   const [londonEnd,    setLondonEnd]    = useState<string>("10:00");
@@ -121,6 +128,13 @@ export function LeftSidebar() {
       if (configToUse.modelTwsRiskMultiplier !== undefined) setModelTwsRiskMultiplier(configToUse.modelTwsRiskMultiplier);
       if (configToUse.hybridM1M15Confluence !== undefined) setHybridM1M15Confluence(configToUse.hybridM1M15Confluence);
       if (configToUse.smtDivergenceCheck !== undefined) setSmtDivergenceCheck(configToUse.smtDivergenceCheck);
+
+      // [CRT-IMPL-6] Cargar estados nuevos
+      if (configToUse.requireCandleConfirmation !== undefined) setRequireCandleConfirmation(configToUse.requireCandleConfirmation);
+      if (configToUse.useDynamicSl !== undefined) setUseDynamicSl(configToUse.useDynamicSl);
+      if (configToUse.useCrtTargets !== undefined) setUseCrtTargets(configToUse.useCrtTargets);
+      if (configToUse.partialCloseAtEq !== undefined) setPartialCloseAtEq(configToUse.partialCloseAtEq);
+      if (configToUse.smtDivergenceEnabled !== undefined) setSmtDivergenceEnabled(configToUse.smtDivergenceEnabled);
 
       if (configToUse.londonStart  !== undefined) setLondonStart(configToUse.londonStart);
       if (configToUse.londonEnd    !== undefined) setLondonEnd(configToUse.londonEnd);
@@ -181,6 +195,11 @@ export function LeftSidebar() {
       disableDimensionFilter,
       minAmplitudeForexPct,
       minAmplitudeIndicesPoints,
+      requireCandleConfirmation,
+      useDynamicSl,
+      useCrtTargets,
+      partialCloseAtEq,
+      smtDivergenceEnabled,
     };
 
     setDraftBotConfig(draft);
@@ -218,6 +237,11 @@ export function LeftSidebar() {
     disableDimensionFilter,
     minAmplitudeForexPct,
     minAmplitudeIndicesPoints,
+    requireCandleConfirmation,
+    useDynamicSl,
+    useCrtTargets,
+    partialCloseAtEq,
+    smtDivergenceEnabled,
     setDraftBotConfig,
   ]);
 
@@ -298,6 +322,11 @@ export function LeftSidebar() {
       disableDimensionFilter,
       minAmplitudeForexPct,
       minAmplitudeIndicesPoints,
+      requireCandleConfirmation,
+      useDynamicSl,
+      useCrtTargets,
+      partialCloseAtEq,
+      smtDivergenceEnabled,
     };
     setBotConfig(config);
     toggleLeftSidebar(); // Cierra tras aplicar la configuración
@@ -639,12 +668,72 @@ export function LeftSidebar() {
             <div className="flex items-center">
               <span className="text-[11px] text-tv-text-muted">Filtro Divergencia SMT</span>
               <InfoBubble text="Si está activo, evita pares que sí barrieron un extremo si su par correlacionado inverso (e.g. DXY) no confirmó el movimiento." />
-              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.smtDivergenceCheck ? "SÍ" : "NO"})</span>
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.smtDivergenceEnabled ? "SÍ" : "NO"})</span>
             </div>
             <input
               type="checkbox"
-              checked={smtDivergenceCheck}
-              onChange={(e) => setSmtDivergenceCheck(e.target.checked)}
+              checked={smtDivergenceEnabled}
+              onChange={(e) => {
+                setSmtDivergenceEnabled(e.target.checked);
+                setSmtDivergenceCheck(e.target.checked);
+              }}
+              className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
+            />
+          </div>
+
+          {/* [CRT-IMPL-6] Nuevos Controles de Metodología */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="text-[11px] text-tv-text-muted">Confirmación por Vela (TBS/TWS)</span>
+              <InfoBubble text="Exige confirmación por cierre de vela M1 (Vela 3) para validar y clasificar el sweep." />
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.requireCandleConfirmation ? "SÍ" : "NO"})</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={requireCandleConfirmation}
+              onChange={(e) => setRequireCandleConfirmation(e.target.checked)}
+              className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
+            />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="text-[11px] text-tv-text-muted">Usar SL Dinámico (Vela 2)</span>
+              <InfoBubble text="Establece el Stop Loss dinámicamente detrás del extremo de la mecha de la Vela 2 + buffer." />
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.useDynamicSl ? "SÍ" : "NO"})</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={useDynamicSl}
+              onChange={(e) => setUseDynamicSl(e.target.checked)}
+              className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
+            />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="text-[11px] text-tv-text-muted">Usar Objetivos CRT (EQ/Extremo)</span>
+              <InfoBubble text="Establece el TP1 en el punto medio de equilibrio (EQ) y el TP2 en el extremo opuesto del rango." />
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.useCrtTargets ? "SÍ" : "NO"})</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={useCrtTargets}
+              onChange={(e) => setUseCrtTargets(e.target.checked)}
+              className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
+            />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <span className="text-[11px] text-tv-text-muted">Cierre Parcial en EQ</span>
+              <InfoBubble text="Ejecuta un cierre parcial y asegura a Breakeven al alcanzar la zona de equilibrio (EQ)." />
+              <span className="text-tv-blue text-[10px] ml-2">(Activo: {botConfig?.partialCloseAtEq ? "SÍ" : "NO"})</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={partialCloseAtEq}
+              onChange={(e) => setPartialCloseAtEq(e.target.checked)}
               className="w-4 h-4 cursor-pointer accent-tv-blue rounded border-zinc-800 bg-tv-bg"
             />
           </div>

@@ -21,8 +21,8 @@ export function PositionsTable() {
   }
 
   return (
-    <div className="overflow-y-auto flex-1">
-      <table className="w-full text-sm text-left">
+    <div className="overflow-y-auto overflow-x-auto flex-1 min-h-0">
+      <table className="w-full min-w-max text-sm text-left">
         <thead className="text-xs text-zinc-500 uppercase bg-zinc-900/50 sticky top-0 z-10">
           <tr>
             <th className="px-4 py-3 font-medium">Ticket</th>

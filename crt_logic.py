@@ -206,3 +206,57 @@ def validate_hard_rules(
                 return False, f"Dimensión insuficiente en Índices: {range_size_pips:.1f} puntos (mínimo: {min_amp_idx} puntos)."
 
     return True, ""
+
+# [CRT-IMPL-2A] Clasificacion TBS / TWS - Fuente: CRT Optimizado Seccion 1
+def classify_sweep_type(vela_2: dict, vela_3: dict, crt_high: float, crt_low: float, direction: str) -> dict:
+    """
+    TBS (A+): cuerpo de vela_2 cierra FUERA del nivel, vela_3 cierra DENTRO, cuerpo < 20% del rango.
+    TWS (moderado): solo la mecha de vela_2 cruza, cierre dentro, vela_3 cierra dentro.
+    Retorna {"type": "TBS"|"TWS"|"INVALID", "confidence": float, "body_ratio": float}
+    """
+    rango_v2 = vela_2["high"] - vela_2["low"]
+    cuerpo_v2 = abs(vela_2["close"] - vela_2["open"])
+    body_ratio = cuerpo_v2 / rango_v2 if rango_v2 > 0 else 1.0
+    if direction == "BUY":
+        mecha_cruza = vela_2["low"] < crt_low
+        cuerpo_cruza = min(vela_2["open"], vela_2["close"]) < crt_low
+        v3_recupera = vela_3["close"] > crt_low
+    else:
+        mecha_cruza = vela_2["high"] > crt_high
+        cuerpo_cruza = max(vela_2["open"], vela_2["close"]) > crt_high
+        v3_recupera = vela_3["close"] < crt_high
+    if not mecha_cruza or not v3_recupera:
+        return {"type": "INVALID", "confidence": 0.0, "body_ratio": body_ratio}
+    cuerpo_limpio = body_ratio < 0.20
+    if cuerpo_cruza and cuerpo_limpio:
+        return {"type": "TBS", "confidence": 1.0, "body_ratio": body_ratio}
+    elif cuerpo_cruza and not cuerpo_limpio:
+        return {"type": "TBS", "confidence": 0.65, "body_ratio": body_ratio}
+    elif not cuerpo_cruza and cuerpo_limpio:
+        return {"type": "TWS", "confidence": 0.75, "body_ratio": body_ratio}
+    else:
+        return {"type": "TWS", "confidence": 0.50, "body_ratio": body_ratio}
+
+# [CRT-IMPL-2B] Verificacion SMT Divergence - Fuente: CRT Optimizado Seccion 5
+def check_smt_divergence(primary_swept: bool, correlated_swept: bool) -> bool:
+    """True = par primario barrio y correlacionado NO (divergencia institucional)."""
+    return primary_swept and not correlated_swept
+
+# [CRT-IMPL-2C] SL dinamico basado en mecha de vela_2 - Fuente: CRT Optimizado Seccion 6
+def calculate_dynamic_sl(vela_2: dict, direction: str, pip_value: float, buffer_pips: float = 1.5) -> float:
+    """SL detras del extremo de la mecha de vela_2 + buffer. Retorna precio absoluto."""
+    buffer = buffer_pips * pip_value
+    if direction == "BUY":
+        return vela_2["low"] - buffer
+    else:
+        return vela_2["high"] + buffer
+
+# [CRT-IMPL-2D] TP1 en EQ y TP2 en extremo opuesto - Fuente: CRT Optimizado Seccion 6
+def calculate_crt_targets(crt_high: float, crt_low: float, direction: str) -> dict:
+    """TP1 = EQ (50%), TP2 = extremo opuesto (100%). Retorna {"eq", "tp1", "tp2"}."""
+    eq = crt_low + 0.5 * (crt_high - crt_low)
+    if direction == "BUY":
+        return {"eq": eq, "tp1": eq, "tp2": crt_high}
+    else:
+        return {"eq": eq, "tp1": eq, "tp2": crt_low}
+

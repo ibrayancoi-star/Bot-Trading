@@ -14,6 +14,27 @@ from dataclasses import dataclass, field
 from typing import Dict
 import threading
 
+# [CRT-IMPL-1] Timezone unificado
+import pytz as _pytz
+_TZ_UTC = _pytz.timezone("UTC")
+_TZ_CANARY = _pytz.timezone("Atlantic/Canary")
+
+def _to_canary(utc_naive_dt):
+    """Convierte datetime naive UTC de MT5 a hora Canaria con DST."""
+    return utc_naive_dt.replace(tzinfo=_TZ_UTC).astimezone(_TZ_CANARY)
+
+# [GAP-FIX-5] Importar módulo CRT puro para uso en fases futuras
+# Las funciones inline existentes se mantienen intactas por compatibilidad.
+# Las nuevas funcionalidades CRT usarán crt_logic.py exclusivamente.
+# NOTA: el log se emite después de configurar el logger (ver bloque post-logger)
+try:
+    from crt_logic import classify_sweep_type, check_smt_divergence
+    CRT_LOGIC_AVAILABLE = True
+    _crt_logic_import_error = None
+except ImportError as e:
+    CRT_LOGIC_AVAILABLE = False
+    _crt_logic_import_error = str(e)
+
 _backtest_running = False
 
 
@@ -37,6 +58,13 @@ class BotConfig:
     model_tws_risk_multiplier: float = 0.5
     hybrid_m1_m15_confluence: bool = True
     smt_divergence_check: bool = True
+
+    # [CRT-IMPL-3] Nuevos campos con default conservador
+    require_candle_confirmation: bool = False
+    use_dynamic_sl: bool = False
+    use_crt_targets: bool = False
+    partial_close_at_eq: bool = False
+    smt_divergence_enabled: bool = False
 
     # [BYPASS CAPA 1] — Killzones dinámicas
     london_start:   str   = "07:00"
@@ -73,6 +101,12 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("MT5Bridge")
+
+# [GAP-FIX-5] Log diferido del import de crt_logic (requiere logger ya configurado)
+if CRT_LOGIC_AVAILABLE:
+    logger.info("[CRT] Módulo crt_logic.py cargado correctamente")
+else:
+    logger.warning(f"[CRT] crt_logic.py no disponible: {_crt_logic_import_error}. Usando lógica inline.")
 
 # Mapa de temporalidades para MetaTrader 5
 # IMPORTANTE: Las claves DEBEN coincidir exactamente con el tipo Timeframe del frontend (minúsculas)
@@ -124,6 +158,13 @@ anchor_ranges = {
     "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"},
     "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"}
 }
+
+# [CRT-IMPL-3] Buffer de confirmacion de sweep por cierre de vela
+_sweep_pending: dict = {}
+
+# [CRT-IMPL-4] EQ targets y control de cierre parcial
+_crt_eq_target: dict = {}
+_eq_done: set = set()
 
 # Registro de la última acción del escáner para evitar spamming en los logs y WS
 last_scanner_action_time = {
@@ -549,7 +590,9 @@ def update_reference_ranges():
 
 def is_in_active_killzone() -> bool:
     """Retorna True si la hora UTC actual está dentro de alguna killzone activa."""
-    now_utc = datetime.datetime.now(datetime.timezone.utc).hour * 60 + datetime.datetime.now(datetime.timezone.utc).minute
+    # [CRT-IMPL-1] Timezone unificado
+    now_canary = _to_canary(datetime.datetime.utcnow())
+    now_utc = now_canary.hour * 60 + now_canary.minute
     with _config_lock:
         kz = bot_config.killzones
         london_start = bot_config.london_start
@@ -585,6 +628,39 @@ def is_in_active_killzone() -> bool:
                 return True
     return False
 
+def get_active_killzone_name() -> str:
+    """Retorna el nombre de la killzone activa o 'none'. [HISTORY-FIX-2]"""
+    now_canary = _to_canary(datetime.datetime.utcnow())
+    now_min = now_canary.hour * 60 + now_canary.minute
+    with _config_lock:
+        kz = bot_config.killzones
+        windows = {}
+        def parse_t(t):
+            try:
+                h, m = map(int, t.split(":")); return h * 60 + m
+            except Exception:
+                return 0
+        if kz.get("london",   False): windows["london"]   = (parse_t(bot_config.london_start),   parse_t(bot_config.london_end))
+        if kz.get("newyork",  False): windows["newyork"]  = (parse_t(bot_config.new_york_start),  parse_t(bot_config.new_york_end))
+        if kz.get("asian",    False): windows["asian"]    = (parse_t(bot_config.asian_start),     parse_t(bot_config.asian_end))
+        if kz.get("overlap",  False): windows["overlap"]  = (12 * 60, 15 * 60)
+    for name, (start, end) in windows.items():
+        if (start <= end and start <= now_min <= end) or (start > end and (now_min >= start or now_min <= end)):
+            return name
+    return "none"
+
+
+def _build_crt_comment(sweep_type, sweep_confidence) -> str:
+    """Construye comment enriquecido para órdenes del bot (máx 31 chars MT5). [HISTORY-FIX-2]"""
+    parts = ["CRT"]
+    if sweep_type:
+        parts.append(f"sweep:{sweep_type}")
+    if sweep_confidence is not None:
+        parts.append(f"conf:{sweep_confidence:.2f}")
+    parts.append(f"kz:{get_active_killzone_name()}")
+    return "|".join(parts)[:31]
+
+
 async def strategy_scanner_task():
     """
     Bucle en segundo plano que monitorea en tiempo real barridos de liquidez (Sweeps)
@@ -612,6 +688,14 @@ async def strategy_scanner_task():
                 # Actualizar rangos periódicamente
                 update_reference_ranges()
                 
+                # [GAP-FIX-3] Verificar límite total de posiciones abiertas
+                if bot_config.max_positions > 0:
+                    all_positions = mt5.positions_get()
+                    total_open = len(all_positions) if all_positions else 0
+                    if total_open >= bot_config.max_positions:
+                        await asyncio.sleep(1.0)
+                        continue
+
                 if not BOT_ACTIVE:
                     await asyncio.sleep(1.0)
                     continue
@@ -648,16 +732,73 @@ async def strategy_scanner_task():
                     if crt_high == 0.0 or crt_low == 0.0:
                         continue # No hay velas de anclaje inicializadas aún
 
-                    direction = None
-                    price = 0.0
-                    
-                    # Detección de Barrido (Sweep)
-                    if bid > crt_high:
-                        direction = "SELL"
-                        price = bid
-                    elif ask < crt_low:
-                        direction = "BUY"
-                        price = ask
+                    # [CRT-IMPL-3] Procesar confirmación de sweep pendiente si existe
+                    if symbol in _sweep_pending and bot_config.require_candle_confirmation:
+                        pendiente = _sweep_pending[symbol]
+                        elapsed = (datetime.datetime.utcnow() - pendiente["timestamp"]).total_seconds()
+                        if elapsed > 180:
+                            logger.info(f"[CRT] {symbol} sweep timeout - descartado")
+                            del _sweep_pending[symbol]
+                            continue
+                        rates_m1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_M1, 0, 2)
+                        if rates_m1 is None or len(rates_m1) < 2:
+                            continue
+                        vela_3_candidate = {"open": float(rates_m1[0]["open"]), "high": float(rates_m1[0]["high"]), "low": float(rates_m1[0]["low"]), "close": float(rates_m1[0]["close"]), "time": rates_m1[0]["time"]}
+                        if vela_3_candidate["time"] <= pendiente["vela_2"]["time"]:
+                            continue
+                        resultado = classify_sweep_type(pendiente["vela_2"], vela_3_candidate, pendiente["crt_high"], pendiente["crt_low"], pendiente["direction"])
+                        if resultado["type"] == "INVALID":
+                            logger.info(f"[CRT] {symbol} Vela 3 no confirmo - sweep descartado")
+                            del _sweep_pending[symbol]
+                            continue
+                        direction = pendiente["direction"]
+                        sweep_type = resultado["type"]
+                        sweep_confidence = resultado["confidence"]
+                        sweep_vela_2 = pendiente["vela_2"]
+                        del _sweep_pending[symbol]
+                        logger.info(f"[CRT] {symbol} sweep CONFIRMADO: {sweep_type} (confianza {sweep_confidence:.2f})")
+                        
+                        price = tick.bid if direction == "SELL" else tick.ask
+                    else:
+                        sweep_type = None
+                        sweep_confidence = None
+                        sweep_vela_2 = None
+
+                        # Detección de Barrido (Sweep)
+                        direction = None
+                        price = 0.0
+                        
+                        if bid > crt_high:
+                            direction = "SELL"
+                            price = bid
+                        elif ask < crt_low:
+                            direction = "BUY"
+                            price = ask
+                        
+                        if direction is not None:
+                            # Evitar spamming de la señal DETECTED (máximo una vez cada 60 segundos por dirección)
+                            last_det_time = last_scanner_action_time[symbol]["DETECTED"]
+                            if now_time - last_det_time > 60:
+                                last_scanner_action_time[symbol]["DETECTED"] = now_time
+                                await broadcast({
+                                    "type": "scanner_signal",
+                                    "symbol": symbol,
+                                    "action": "DETECTED",
+                                    "direction": direction,
+                                    "price": price,
+                                    "message": f"⚠️ Señal de barrido detectada en {symbol} ({direction} @ {price:.5f}). Evaluando filtros..."
+                                })
+                                logger.info(f"Escáner: Señal de barrido detectada en {symbol} ({direction} @ {price:.5f}). Evaluando filtros...")
+
+                            # [CRT-IMPL-3] Registrar pendiente si require_candle_confirmation está activo
+                            if bot_config.require_candle_confirmation and CRT_LOGIC_AVAILABLE:
+                                if symbol not in _sweep_pending:
+                                    rates_m1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_M1, 0, 2)
+                                    if rates_m1 is not None and len(rates_m1) >= 2:
+                                        vela_2 = {"open": float(rates_m1[0]["open"]), "high": float(rates_m1[0]["high"]), "low": float(rates_m1[0]["low"]), "close": float(rates_m1[0]["close"]), "time": rates_m1[0]["time"]}
+                                        _sweep_pending[symbol] = {"direction": direction, "vela_2": vela_2, "crt_high": crt_high, "crt_low": crt_low, "timestamp": datetime.datetime.utcnow()}
+                                        logger.info(f"[CRT] {symbol} sweep pendiente de confirmacion ({direction}) - esperando Vela 3")
+                                continue
 
                     if direction is not None:
                         # Evitar spamming de la señal DETECTED (máximo una vez cada 60 segundos por dirección)
@@ -699,6 +840,29 @@ async def strategy_scanner_task():
                                 })
                                 logger.info(f"Escáner: Señal desestimada en {symbol}: {hard_msg}")
                             continue
+
+                        # [CRT-IMPL-3] Filtro SMT Divergence
+                        if bot_config.smt_divergence_enabled and CRT_LOGIC_AVAILABLE:
+                            correlated_sym = "GBPUSD" if symbol == "EURUSD" else "EURUSD"
+                            corr_ranges = anchor_ranges.get(correlated_sym, {})
+                            corr_tick = mt5.symbol_info_tick(correlated_sym)
+                            if corr_ranges and corr_tick:
+                                corr_bid = corr_tick.bid
+                                corr_ask = corr_tick.ask
+                                corr_high = corr_ranges.get("high", 0)
+                                corr_low = corr_ranges.get("low", 0)
+                                if direction == "SELL":
+                                    primary_swept = bid > crt_high
+                                    correlated_swept = corr_bid > corr_high
+                                else:
+                                    primary_swept = ask < crt_low
+                                    correlated_swept = corr_ask < corr_low
+                                has_divergence = check_smt_divergence(primary_swept, correlated_swept)
+                                if not has_divergence:
+                                    logger.info(f"[CRT] SMT: ambos pares barrieron - sin divergencia, descartado")
+                                    await broadcast({"type": "scanner_signal", "symbol": symbol, "action": "DISMISSED", "direction": direction, "reason": "SMT: sin divergencia institucional"})
+                                    continue
+                                logger.info(f"[CRT] SMT: divergencia confirmada - {symbol} barrio, {correlated_sym} no")
 
                         # --- CAPA 2/3: VALIDACIÓN DE CONTEXTO DE MERCADO ---
                         setup_name = f"Sweep {'High' if direction == 'SELL' else 'Low'} Reversal ({direction})"
@@ -748,7 +912,31 @@ async def strategy_scanner_task():
                             tp_price = price + tp_pips * pip_value
                             order_type = mt5.ORDER_TYPE_BUY
 
+                        # [CRT-IMPL-3] SL dinamico basado en mecha de vela_2
+                        if bot_config.use_dynamic_sl and sweep_vela_2 and CRT_LOGIC_AVAILABLE:
+                            sl_price_calc = calculate_dynamic_sl(sweep_vela_2, direction, pip_value, buffer_pips=1.5)
+                            if direction == "BUY" and sl_price_calc < price:
+                                sl_price = sl_price_calc
+                                logger.info(f"[CRT] SL dinamico aplicado: {sl_price:.5f}")
+                            elif direction == "SELL" and sl_price_calc > price:
+                                sl_price = sl_price_calc
+                                logger.info(f"[CRT] SL dinamico aplicado: {sl_price:.5f}")
+
+                        # [CRT-IMPL-3] TP1 en EQ, TP2 en extremo opuesto
+                        if bot_config.use_crt_targets and CRT_LOGIC_AVAILABLE:
+                            targets = calculate_crt_targets(crt_high, crt_low, direction)
+                            tp_price = targets["tp2"]
+                            _crt_eq_target[symbol] = targets["tp1"]
+                            logger.info(f"[CRT] Targets: EQ={targets['eq']:.5f} TP1={targets['tp1']:.5f} TP2={targets['tp2']:.5f}")
+
                         volume = lot  # Lotaje controlado desde el frontend
+
+                        # [CRT-IMPL-3] Multiplicador TBS/TWS al lotaje
+                        if sweep_type and CRT_LOGIC_AVAILABLE:
+                            multiplier = bot_config.model_tbs_risk_multiplier if sweep_type == "TBS" else bot_config.model_tws_risk_multiplier
+                            volume = round(volume * multiplier, 2)
+                            volume = max(volume, 0.01)
+                            logger.info(f"[CRT] Lotaje ajustado por {sweep_type}: {volume} (x{multiplier})")
                         
                         request = {
                             "action": mt5.TRADE_ACTION_DEAL,
@@ -760,7 +948,7 @@ async def strategy_scanner_task():
                             "tp": tp_price,
                             "deviation": 20,
                             "magic": 234000,
-                            "comment": f"Auto {direction} Reversal",
+                            "comment": _build_crt_comment(sweep_type, sweep_confidence),  # [HISTORY-FIX-2]
                             "type_time": mt5.ORDER_TIME_GTC,
                         }
 
@@ -902,6 +1090,35 @@ async def positions_broadcaster():
             try:
                 positions = mt5.positions_get()
                 if positions is not None:
+                    # [CRT-IMPL-4] Cierre parcial en EQ
+                    if bot_config.partial_close_at_eq and CRT_LOGIC_AVAILABLE:
+                        for pos in positions:
+                            ticket = pos.ticket
+                            sym = pos.symbol
+                            eq_price = _crt_eq_target.get(sym)
+                            if not eq_price or ticket in _eq_done:
+                                continue
+                            current = pos.price_current
+                            hit_eq = (pos.type == 0 and current >= eq_price) or (pos.type == 1 and current <= eq_price)
+                            if hit_eq:
+                                vol_cerrar = round(pos.volume * (bot_config.partial_close_pct / 100), 2)
+                                if vol_cerrar >= 0.01:
+                                    close_req = mt5.order_send({
+                                        "action": mt5.TRADE_ACTION_DEAL,
+                                        "symbol": sym,
+                                        "volume": vol_cerrar,
+                                        "type": mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY,
+                                        "position": ticket,
+                                        "price": mt5.symbol_info_tick(sym).bid if pos.type == 0 else mt5.symbol_info_tick(sym).ask,
+                                        "comment": "CRT_EQ_PARTIAL"
+                                    })
+                                    if close_req and close_req.retcode == mt5.TRADE_RETCODE_DONE:
+                                        mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": ticket, "sl": pos.price_open, "tp": pos.tp})
+                                        _eq_done.add(ticket)
+                                        logger.info(f"[CRT] {sym} cierre parcial en EQ: {vol_cerrar} lotes, SL a breakeven")
+                        open_tickets = {p.ticket for p in positions}
+                        _eq_done &= open_tickets
+
                     pos_list = []
                     for p in positions:
                         pos_list.append({
@@ -1017,6 +1234,7 @@ def panic_close_all_positions():
 async def tick_broadcaster():
     """Bucle de alta frecuencia para consultar y transmitir ticks de EURUSD y GBPUSD, y evaluar Risk Guard."""
     global MT5_INITIALIZED, RISK_GUARD_TRIGGERED, daily_starting_balance, daily_starting_date
+    _risk_guard_logged = False
     while True:
         if MT5_INITIALIZED:
             # === RISK GUARD LOGIC ===
@@ -1034,8 +1252,27 @@ async def tick_broadcaster():
                     current_equity = acc_info.equity
                     current_loss = daily_starting_balance - current_equity
                     
-                    max_daily_loss = daily_starting_balance * (risk_config.get("max_daily_loss_pct", 4.5) / 100.0)
-                    max_total_loss = daily_starting_balance * (risk_config.get("max_total_loss_pct", 8.0) / 100.0)
+                    # [GAP-FIX-2] Usar max_daily_loss de BotConfig si está definido (> 0),
+                    # fallback a config_crt.json para compatibilidad con sesiones sin UI.
+                    effective_daily_loss_pct = (
+                        bot_config.max_daily_loss
+                        if bot_config.max_daily_loss > 0
+                        else risk_config.get("max_daily_loss_pct", 4.5)
+                    )
+                    
+                    effective_total_loss_pct = (
+                        bot_config.max_daily_loss * 2  # convención: total = 2x diario
+                        if bot_config.max_daily_loss > 0
+                        else risk_config.get("max_total_loss_pct", 8.0)
+                    )
+                    
+                    if not _risk_guard_logged:
+                        logger.info(f"[RISK GUARD] Límites efectivos: diario={effective_daily_loss_pct}% "
+                                    f"total={effective_total_loss_pct}% (fuente: {'UI' if bot_config.max_daily_loss > 0 else 'config_crt.json'})")
+                        _risk_guard_logged = True
+                        
+                    max_daily_loss = daily_starting_balance * (effective_daily_loss_pct / 100.0)
+                    max_total_loss = daily_starting_balance * (effective_total_loss_pct / 100.0)
                     
                     if current_loss >= max_daily_loss or current_loss >= max_total_loss:
                         RISK_GUARD_TRIGGERED = True
@@ -1126,6 +1363,133 @@ async def run_backtest(params, websocket):
     finally:
         _backtest_running = False
 
+# [HISTORY-FIX-1] Envía historial real de MT5 (últimos N días) a un cliente.
+async def send_trade_history(websocket, days_back: int = 30):
+    """Envía history_full con trades cerrados reales de MT5 + métricas agregadas."""
+    if not MT5_INITIALIZED:
+        return
+    try:
+        date_from = datetime.datetime.now() - datetime.timedelta(days=days_back)
+        date_to   = datetime.datetime.now()
+        deals = mt5.history_deals_get(date_from, date_to)
+        if deals is None:
+            return
+
+        closed_deals = [d for d in deals if d.entry in (1, 2)]
+        history = []
+        for d in closed_deals:
+            open_deals = [od for od in deals if od.position_id == d.position_id and od.entry == 0]
+            open_deal  = open_deals[0] if open_deals else None
+
+            open_price = open_deal.price if open_deal else 0.0
+            open_time  = datetime.datetime.fromtimestamp(open_deal.time).isoformat() if open_deal else ""
+            close_time = datetime.datetime.fromtimestamp(d.time).isoformat()
+            duration_s = int(d.time - open_deal.time) if open_deal else 0
+
+            comment_str = d.comment or ""
+            if comment_str.startswith("CRT") or "scanner" in comment_str.lower():
+                origin = "bot_partial" if "CRT_EQ_PARTIAL" in comment_str else "bot"
+            else:
+                origin = "manual"
+
+            sym_info  = mt5.symbol_info(d.symbol)
+            point     = sym_info.point if sym_info else 0.00001
+            pip_value = point * 10
+            pips = 0.0
+            if open_price > 0 and pip_value > 0:
+                if d.type == mt5.DEAL_TYPE_SELL:
+                    pips = round((d.price - open_price) / pip_value, 1)
+                else:
+                    pips = round((open_price - d.price) / pip_value, 1)
+
+            # [HISTORY-FIX-2] Parsear métricas CRT del comment
+            crt_meta: dict = {}
+            if comment_str.startswith("CRT"):
+                for part in comment_str.split("|")[1:]:
+                    if ":" in part:
+                        k, v = part.split(":", 1)
+                        crt_meta[k] = v
+
+            trade: dict = {
+                "ticket":      d.position_id,
+                "symbol":      d.symbol,
+                "direction":   "BUY" if (open_deal and open_deal.type == mt5.DEAL_TYPE_BUY) else "SELL",
+                "volume":      round(d.volume, 2),
+                "open_price":  round(open_price, 5),
+                "close_price": round(d.price, 5),
+                "open_time":   open_time,
+                "close_time":  close_time,
+                "duration_s":  duration_s,
+                "profit":      round(d.profit, 2),
+                "pips":        pips,
+                "commission":  round(d.commission, 2),
+                "swap":        round(d.swap, 2),
+                "net_profit":  round(d.profit + d.commission + d.swap, 2),
+                "origin":      origin,
+                "comment":     comment_str,
+                "sl":          0.0,
+                "tp":          0.0,
+                "crt_meta":    crt_meta,
+            }
+            orders = mt5.history_orders_get(position=d.position_id)
+            if orders:
+                for o in orders:
+                    if o.sl > 0: trade["sl"] = round(o.sl, 5)
+                    if o.tp > 0: trade["tp"] = round(o.tp, 5)
+            history.append(trade)
+
+        history.sort(key=lambda x: x["close_time"], reverse=True)
+
+        # [HISTORY-FIX-2] Métricas agregadas
+        total    = len(history)
+        wins     = [t for t in history if t["profit"] > 0]
+        losses   = [t for t in history if t["profit"] < 0]
+        bots     = [t for t in history if t["origin"] in ("bot", "bot_partial")]
+        manuals  = [t for t in history if t["origin"] == "manual"]
+        t_profit = sum(t["net_profit"] for t in history)
+        t_pips   = sum(t["pips"]       for t in history)
+        avg_dur  = sum(t["duration_s"] for t in history) / total if total else 0
+        wr       = len(wins) / total * 100 if total else 0
+        avg_w    = sum(t["net_profit"] for t in wins)   / len(wins)   if wins   else 0
+        avg_l    = sum(t["net_profit"] for t in losses) / len(losses) if losses else 0
+        l_sum    = sum(t["net_profit"] for t in losses)
+        pf       = abs(sum(t["net_profit"] for t in wins) / l_sum) if l_sum != 0 else 0
+        max_dd   = min((t["net_profit"] for t in history), default=0)
+        tbs = [t for t in history if t.get("crt_meta", {}).get("sweep") == "TBS"]
+        tws = [t for t in history if t.get("crt_meta", {}).get("sweep") == "TWS"]
+        tbs_wr = len([t for t in tbs if t["profit"] > 0]) / len(tbs) * 100 if tbs else 0
+        tws_wr = len([t for t in tws if t["profit"] > 0]) / len(tws) * 100 if tws else 0
+
+        metrics = {
+            "total":          total,
+            "wins":           len(wins),
+            "losses":         len(losses),
+            "win_rate":       round(wr,      1),
+            "total_profit":   round(t_profit, 2),
+            "total_pips":     round(t_pips,   1),
+            "avg_win":        round(avg_w,    2),
+            "avg_loss":       round(avg_l,    2),
+            "profit_factor":  round(pf,       2),
+            "avg_duration_s": round(avg_dur),
+            "max_dd_trade":   round(max_dd,   2),
+            "bot_trades":     len(bots),
+            "manual_trades":  len(manuals),
+            "tbs_count":      len(tbs),
+            "tbs_wr":         round(tbs_wr, 1),
+            "tws_count":      len(tws),
+            "tws_wr":         round(tws_wr, 1),
+        }
+
+        await websocket.send(json.dumps({
+            "type":    "history_full",
+            "trades":  history,
+            "metrics": metrics,
+        }))
+        logger.info(f"[HISTORY] Enviado history_full: {total} trades a {websocket.remote_address}")
+    except Exception as e:
+        logger.error(f"[HISTORY] Error en send_trade_history: {e}")
+
+
 async def handler(websocket):
     """Manejador de conexiones WebSocket entrantes."""
     global BOT_ACTIVE, ACTIVE_BOT_SYMBOLS
@@ -1186,6 +1550,12 @@ async def handler(websocket):
                 }))
     except Exception as e:
         logger.error(f"Error al enviar history_init al cliente: {e}")
+
+    # [HISTORY-FIX-1] Enviar historial real de MT5 al conectar
+    try:
+        await send_trade_history(websocket)
+    except Exception as e:
+        logger.error(f"Error al enviar history_full al cliente: {e}")
 
     try:
         async for message in websocket:
@@ -1284,6 +1654,13 @@ async def handler(websocket):
                         bot_config.model_tws_risk_multiplier = float(payload.get("modelTwsRiskMultiplier", bot_config.model_tws_risk_multiplier))
                         bot_config.hybrid_m1_m15_confluence = bool(payload.get("hybridM1M15Confluence", bot_config.hybrid_m1_m15_confluence))
                         bot_config.smt_divergence_check = bool(payload.get("smtDivergenceCheck", bot_config.smt_divergence_check))
+                        
+                        # [CRT-IMPL-3] WS update para nuevos parámetros
+                        bot_config.require_candle_confirmation = bool(payload.get("require_candle_confirmation", bot_config.require_candle_confirmation))
+                        bot_config.use_dynamic_sl = bool(payload.get("use_dynamic_sl", bot_config.use_dynamic_sl))
+                        bot_config.use_crt_targets = bool(payload.get("use_crt_targets", bot_config.use_crt_targets))
+                        bot_config.partial_close_at_eq = bool(payload.get("partial_close_at_eq", bot_config.partial_close_at_eq))
+                        bot_config.smt_divergence_enabled = bool(payload.get("smt_divergence_enabled", bot_config.smt_divergence_enabled))
 
                         # [BYPASS CAPA 1] — Killzones dinámicas
                         bot_config.london_start   = payload.get("londonStart",   bot_config.london_start)
@@ -1643,9 +2020,9 @@ async def feedback_loop_task():
     y registrar los resultados en ChromaDB de forma asíncrona.
     """
     global MT5_INITIALIZED
-    # Evitar duplicados
     processed_deals = set()
-    
+    _history_iter = 0  # [HISTORY-FIX-1] Contador para broadcast each 30 s (6 × 5s)
+
     logger.info("Feedback Loop: Iniciando tarea de monitoreo en segundo plano...")
     
     while True:
@@ -1737,6 +2114,18 @@ async def feedback_loop_task():
             except Exception as e:
                 logger.error(f"Feedback Loop: Error en monitoreo de deals: {e}")
                 
+        # [HISTORY-FIX-1] Broadcast historial real cada 30 s
+        _history_iter += 1
+        if _history_iter >= 6:
+            _history_iter = 0
+            inactive_hist = set()
+            for client in list(CONNECTED_CLIENTS):
+                try:
+                    await send_trade_history(client)
+                except Exception:
+                    inactive_hist.add(client)
+            CONNECTED_CLIENTS.difference_update(inactive_hist)
+
         # Verificar cada 5 segundos
         await asyncio.sleep(5)
 

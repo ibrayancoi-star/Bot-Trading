@@ -188,6 +188,16 @@ export function PriceChart({ symbol, timeframe }: Props) {
       rightPriceScale: {
         borderColor: TV_COLORS.border,
         textColor: TV_COLORS.textMuted,
+        // [UI-FIX-1] Más densidad de marcas en la escala lateral
+        ticksVisible: true,
+        minimumWidth: 65,
+        borderVisible: true,
+        // [UI-FIX-3] Márgenes de escala para mostrar más niveles intermedios
+        scaleMargins: { top: 0.1, bottom: 0.1 },
+      },
+      // [UI-FIX-1] Formato de precio con 5 decimales en la escala
+      localization: {
+        priceFormatter: (price: number) => price.toFixed(5),
       },
       timeScale: {
         borderColor: TV_COLORS.border,
@@ -209,25 +219,36 @@ export function PriceChart({ symbol, timeframe }: Props) {
       wickDownColor: TV_COLORS.red,
       priceLineColor: TV_COLORS.textMuted,
       priceLineStyle: 2,
+      // [UI-FIX-1] Precisión de 5 decimales / paso de 1 point → más niveles intermedios
+      priceFormat: {
+        type: "price",
+        precision: 5,
+        minMove: 0.00001,
+      },
     });
 
+    // [UI-FIX-3] Las EMAs comparten la escala principal → mismo priceFormat de 5 decimales
+    const emaPriceFormat = { type: "price" as const, precision: 5, minMove: 0.00001 };
     ema20Ref.current = chart.addSeries(LineSeries, {
       color: INDICATOR_COLORS.ema20,
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
+      priceFormat: emaPriceFormat,
     });
     ema50Ref.current = chart.addSeries(LineSeries, {
       color: INDICATOR_COLORS.ema50,
       lineWidth: 1,
       priceLineVisible: false,
       lastValueVisible: false,
+      priceFormat: emaPriceFormat,
     });
     ema200Ref.current = chart.addSeries(LineSeries, {
       color: INDICATOR_COLORS.ema200,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
+      priceFormat: emaPriceFormat,
     });
 
     ema9Ref.current = chart.addSeries(LineSeries, {
@@ -235,12 +256,14 @@ export function PriceChart({ symbol, timeframe }: Props) {
       lineWidth: 1.5 as any,
       priceLineVisible: false,
       lastValueVisible: false,
+      priceFormat: emaPriceFormat,
     });
     ema21Ref.current = chart.addSeries(LineSeries, {
       color: "#f97316",
       lineWidth: 1.5 as any,
       priceLineVisible: false,
       lastValueVisible: false,
+      priceFormat: emaPriceFormat,
     });
 
     chartRef.current = chart;

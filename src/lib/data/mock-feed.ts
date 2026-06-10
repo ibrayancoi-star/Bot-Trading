@@ -554,6 +554,26 @@ function connectLocalMT5Bridge() {
 
           activeOnCandleCallback({ ...liveCandle });
         }
+      } else if (data.type === "history_full") {
+        // [HISTORY-FIX-1] Historial real de MT5: reemplaza tradeHistory + métricas
+        const trades = data.trades || [];
+        const metrics = data.metrics || null;
+        useTradingStore.getState().setTradeHistory(trades);
+        if (metrics) {
+          useTradingStore.getState().setTradeMetrics(metrics);
+        }
+      } else if (data.type === "scanner_signal") {
+        // [SCANNER-WIRE] Señal del scanner → panel ScannerLog
+        useTradingStore.getState().addScannerSignal({
+          id: `${data.symbol ?? "?"}-${data.action ?? "?"}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          action: data.action ?? "DETECTED",
+          symbol: data.symbol ?? "?",
+          direction: data.direction,
+          price: data.price,
+          reason: data.reason,
+          message: data.message,
+          timestamp: Date.now(),
+        });
       } else if (data.type === "history_init") {
         // [POSITIONS MODULE] Historial de MT5 (no de Chroma)
         const normalized = (data.trades || []).map((t: any) => ({
