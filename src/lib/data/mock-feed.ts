@@ -609,6 +609,10 @@ function connectLocalMT5Bridge() {
           close_time:  t.close_time  ?? t.time_close ?? t.time ?? Date.now()
         };
         useTradingStore.getState().appendHistory(trade as any);
+      } else if (data.type === "daily_range") {
+        useTradingStore.getState().setDailyRange(data);
+      } else if (data.type === "anchor_update") {
+        useTradingStore.getState().setAnchorRanges(data);
       }
     } catch (err) {
       console.error("❌ [MT5 Bridge] Error al parsear mensaje:", err);

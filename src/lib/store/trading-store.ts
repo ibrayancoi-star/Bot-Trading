@@ -7,22 +7,22 @@ import { HistoricalTrade } from "../types/market";
 
 // [POSITIONS MODULE]
 export interface Position {
-  ticket:        number;
-  symbol:        string;
-  type:          "buy" | "sell";
-  volume:        number;
-  open_price:    number;
+  ticket: number;
+  symbol: string;
+  type: "buy" | "sell";
+  volume: number;
+  open_price: number;
   current_price: number;
-  sl:            number;
-  tp:            number;
-  profit:        number;
-  time:          number;
+  sl: number;
+  tp: number;
+  profit: number;
+  time: number;
 }
 
 export interface ClosedTrade extends Position {
   close_price: number;
-  close_time:  number;
-  pnl:         number;
+  close_time: number;
+  pnl: number;
 }
 
 export interface PropAccount {
@@ -100,28 +100,28 @@ export interface BotConfig {
   smtDivergenceEnabled: boolean;
 
   // ── Killzones dinámicas ─────────────────────────────
-  londonStart:   string;   // "07:00" (UTC)
-  londonEnd:     string;   // "10:00" (UTC)
-  newYorkStart:  string;   // "12:00" (UTC)
-  newYorkEnd:    string;   // "15:00" (UTC)
-  asianStart:    string;   // "02:00" (UTC)
-  asianEnd:      string;   // "05:00" (UTC)
+  londonStart: string;   // "07:00" (UTC)
+  londonEnd: string;   // "10:00" (UTC)
+  newYorkStart: string;   // "12:00" (UTC)
+  newYorkEnd: string;   // "15:00" (UTC)
+  asianStart: string;   // "02:00" (UTC)
+  asianEnd: string;   // "05:00" (UTC)
 
   // ── Filtros con bypass ──────────────────────────────
-  maxSpreadPoints:    number;   // Spread máximo en puntos
+  maxSpreadPoints: number;   // Spread máximo en puntos
   disableSpreadFilter: boolean; // true = ignorar el filtro de spread
 
-  minAtrPips:         number;   // ATR mínimo requerido en pips
-  disableAtrFilter:   boolean;  // true = ignorar el filtro de ATR
+  minAtrPips: number;   // ATR mínimo requerido en pips
+  disableAtrFilter: boolean;  // true = ignorar el filtro de ATR
 
   // ── Bypass de validación de mecha CRT ──────────────
-  maxWickBodyRatio:         number;   // % máx del cuerpo sobre la vela (defecto: 20)
-  disableWickBodyFilter:    boolean;  // true = ignorar la regla del 20%
+  maxWickBodyRatio: number;   // % máx del cuerpo sobre la vela (defecto: 20)
+  disableWickBodyFilter: boolean;  // true = ignorar la regla del 20%
 
   // [BYPASS DIMENSIÓN]
-  disableDimensionFilter:       boolean;
-  minAmplitudeForexPct:         number;
-  minAmplitudeIndicesPoints:    number;
+  disableDimensionFilter: boolean;
+  minAmplitudeForexPct: number;
+  minAmplitudeIndicesPoints: number;
 }
 
 // [SCANNER-WIRE] Señal emitida por el scanner del bridge
@@ -157,6 +157,24 @@ export interface HistoryTrade {
   sl: number;
   tp: number;
   crt_meta?: Record<string, string>;
+}
+
+// [CHART-VISUAL-2] Estado para decoraciones visuales del gráfico
+export interface DailyRange {
+  symbol: string;
+  high: number;
+  low: number;
+  open: number;
+  close: number;
+  time: number;
+}
+
+export interface AnchorRanges {
+  symbol: string;
+  high: number;
+  low: number;
+  eq: number;
+  anchor_time: string;
 }
 
 // [HISTORY-FIX-2] Métricas agregadas del historial
@@ -207,17 +225,23 @@ interface TradingState {
   // [SCANNER-WIRE] Señales del scanner (panel ScannerLog)
   scannerSignals: ScannerSignal[];
 
+  // [CHART-VISUAL-2] Capas visuales
+  dailyRanges: Record<string, DailyRange>;
+  anchorRanges: Record<string, AnchorRanges>;
+  setDailyRange: (d: DailyRange) => void;
+  setAnchorRanges: (a: AnchorRanges) => void;
+
   // Acciones
-  setPositions:      (positions: Position[]) => void;
-  initHistory:       (trades: ClosedTrade[]) => void;
-  appendHistory:     (trade: ClosedTrade) => void;
+  setPositions: (positions: Position[]) => void;
+  initHistory: (trades: ClosedTrade[]) => void;
+  appendHistory: (trade: ClosedTrade) => void;
 
   // [HISTORY-FIX-1] Acciones del historial real
-  setTradeHistory:   (trades: HistoryTrade[]) => void;
-  setTradeMetrics:   (metrics: TradeMetrics) => void;
+  setTradeHistory: (trades: HistoryTrade[]) => void;
+  setTradeMetrics: (metrics: TradeMetrics) => void;
 
   // [SCANNER-WIRE] Añade una señal del scanner (cap 100)
-  addScannerSignal:  (signal: ScannerSignal) => void;
+  addScannerSignal: (signal: ScannerSignal) => void;
 
   // Actions
   setAccountType: (type: "real" | "fondeo" | "demo") => void;
@@ -303,26 +327,26 @@ export const useTradingStore = create<TradingState>()(
         partialCloseAtEq: false,
         smtDivergenceEnabled: false,
 
-        londonStart:   "07:00",
-        londonEnd:     "10:00",
-        newYorkStart:  "12:00",
-        newYorkEnd:    "15:00",
-        asianStart:    "02:00",
-        asianEnd:      "05:00",
+        londonStart: "07:00",
+        londonEnd: "10:00",
+        newYorkStart: "12:00",
+        newYorkEnd: "15:00",
+        asianStart: "02:00",
+        asianEnd: "05:00",
 
-        maxSpreadPoints:       20,
-        disableSpreadFilter:   false,
+        maxSpreadPoints: 20,
+        disableSpreadFilter: false,
 
-        minAtrPips:            12,
-        disableAtrFilter:      false,
+        minAtrPips: 12,
+        disableAtrFilter: false,
 
-        maxWickBodyRatio:      20,
+        maxWickBodyRatio: 20,
         disableWickBodyFilter: false,
 
         // [BYPASS DIMENSIÓN]
-        disableDimensionFilter:       false,
-        minAmplitudeForexPct:         0.08,
-        minAmplitudeIndicesPoints:    20.0,
+        disableDimensionFilter: false,
+        minAmplitudeForexPct: 0.08,
+        minAmplitudeIndicesPoints: 20.0,
       },
       draftBotConfig: {
         strategy: "scalping",
@@ -349,26 +373,26 @@ export const useTradingStore = create<TradingState>()(
         partialCloseAtEq: false,
         smtDivergenceEnabled: false,
 
-        londonStart:   "07:00",
-        londonEnd:     "10:00",
-        newYorkStart:  "12:00",
-        newYorkEnd:    "15:00",
-        asianStart:    "02:00",
-        asianEnd:      "05:00",
+        londonStart: "07:00",
+        londonEnd: "10:00",
+        newYorkStart: "12:00",
+        newYorkEnd: "15:00",
+        asianStart: "02:00",
+        asianEnd: "05:00",
 
-        maxSpreadPoints:       20,
-        disableSpreadFilter:   false,
+        maxSpreadPoints: 20,
+        disableSpreadFilter: false,
 
-        minAtrPips:            12,
-        disableAtrFilter:      false,
+        minAtrPips: 12,
+        disableAtrFilter: false,
 
-        maxWickBodyRatio:      20,
+        maxWickBodyRatio: 20,
         disableWickBodyFilter: false,
 
         // [BYPASS DIMENSIÓN]
-        disableDimensionFilter:       false,
-        minAmplitudeForexPct:         0.08,
-        minAmplitudeIndicesPoints:    20.0,
+        disableDimensionFilter: false,
+        minAmplitudeForexPct: 0.08,
+        minAmplitudeIndicesPoints: 20.0,
       },
       isLeftSidebarOpen: false,
 
@@ -381,10 +405,14 @@ export const useTradingStore = create<TradingState>()(
       // [SCANNER-WIRE] Señales del scanner
       scannerSignals: [],
 
+      // [CHART-VISUAL-2] Capas visuales iniciales
+      dailyRanges: {},
+      anchorRanges: {},
+
       // [POSITIONS MODULE]
-      setPositions:  (positions) => set({ positions }),
-      initHistory:   (trades)    => set({ tradeHistory: trades }),
-      appendHistory: (trade)     => set((state) => ({
+      setPositions: (positions) => set({ positions }),
+      initHistory: (trades) => set({ tradeHistory: trades }),
+      appendHistory: (trade) => set((state) => ({
         tradeHistory: [trade, ...state.tradeHistory].slice(0, 500) // cap en 500
       })),
 
@@ -397,6 +425,19 @@ export const useTradingStore = create<TradingState>()(
         scannerSignals: [signal, ...state.scannerSignals].slice(0, 100),
       })),
 
+      setDailyRange: (d) => set((state) => ({
+        dailyRanges: {
+          ...state.dailyRanges,
+          [d.symbol]: d,
+        },
+      })),
+      setAnchorRanges: (a) => set((state) => ({
+        anchorRanges: {
+          ...state.anchorRanges,
+          [a.symbol]: a,
+        },
+      })),
+
       setAccountType: (type) => set({ accountType: type }),
       setHistoricalTrades: (trades) => set({ historicalTrades: trades }),
       addHistoricalTrade: (trade) =>
@@ -405,7 +446,7 @@ export const useTradingStore = create<TradingState>()(
             trade,
             ...state.historicalTrades.filter((t) => t.id !== trade.id),
           ].slice(0, 50), // Guardar hasta 50 últimos trades
-          })),
+        })),
 
       updateEquity: (newEquity) => {
         set((state) => ({

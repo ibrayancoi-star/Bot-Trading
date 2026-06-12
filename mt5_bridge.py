@@ -9,7 +9,10 @@ import os
 import datetime
 import time
 from zoneinfo import ZoneInfo
-from context_engine import initialize_vector_db, validate_market_context, add_trade_experience, get_historical_trades_text
+from context_engine import (
+    initialize_vector_db, get_historical_trades_text,
+    validate_market_context_async, add_trade_experience_async, migrate_to_symbol_collections,  # [CHROMA-OPT]
+)
 from dataclasses import dataclass, field
 from typing import Dict
 import threading
@@ -585,9 +588,93 @@ def update_reference_ranges():
                         "eq": eq,
                         "anchor_time": anchor_label
                     }))
+                    asyncio.create_task(emit_daily_range(None))  # broadcast a todos
     except Exception as e:
         logger.error(f"Error en update_reference_ranges: {e}")
 
+# [CHART-VISUAL-1] Emitir rango de vela diaria para dibujo en gráfico
+async def emit_daily_range(target):
+    """
+    Última vela D1 cerrada que cumple DOS condiciones:
+    1. Su rango (wick high/low) contiene el precio actual
+    2. Su rango no fue superado por el CUERPO de velas cerradas posteriores
+    La vela en formación NO participa como evaluadora ni como candidata.
+    """
+    bot_active_symbols = ACTIVE_BOT_SYMBOLS
+    for symbol in bot_active_symbols:
+        broker_sym = get_broker_symbol(symbol)
+
+        # Solo velas CERRADAS (start_pos=1 salta la en formación)
+        rates_d1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_D1, 1, 15)
+        if rates_d1 is None or len(rates_d1) < 2:
+            continue
+
+        # Obtener precio actual para verificar contención
+        tick = mt5.symbol_info_tick(broker_sym)
+        if tick is None:
+            continue
+        current_bid = tick.bid
+
+        from datetime import datetime
+        reference = None
+
+        logger.info(f"[D1-RANGE] === {symbol} | bid={current_bid:.5f} | {len(rates_d1)} velas cerradas ===")
+
+        for i in range(len(rates_d1) - 1, -1, -1):
+            wick_high = float(rates_d1[i]["high"])
+            wick_low = float(rates_d1[i]["low"])
+            candle_date = datetime.fromtimestamp(int(rates_d1[i]["time"])).strftime("%d/%m")
+
+            # Condición 1: el precio actual debe estar DENTRO del rango
+            if current_bid > wick_high or current_bid < wick_low:
+                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ⏭️ Precio fuera del rango")
+                continue
+
+            # Condición 2: ninguna vela CERRADA posterior superó con cuerpo
+            superado = False
+            rota_por = ""
+            for j in range(i + 1, len(rates_d1)):
+                body_top = max(float(rates_d1[j]["open"]), float(rates_d1[j]["close"]))
+                body_bot = min(float(rates_d1[j]["open"]), float(rates_d1[j]["close"]))
+                breaker_date = datetime.fromtimestamp(int(rates_d1[j]["time"])).strftime("%d/%m")
+
+                if body_top > wick_high:
+                    superado = True
+                    rota_por = f"HIGH roto por {breaker_date} (body={body_top:.5f} > high={wick_high:.5f})"
+                    break
+                if body_bot < wick_low:
+                    superado = True
+                    rota_por = f"LOW roto por {breaker_date} (body={body_bot:.5f} < low={wick_low:.5f})"
+                    break
+
+            if superado:
+                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ❌ {rota_por}")
+            else:
+                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ✅ VÁLIDA")
+                reference = rates_d1[i]
+                logger.info(f"[D1-RANGE] → REFERENCIA: {candle_date}")
+                break
+
+        if reference is None:
+            reference = rates_d1[-1]
+            fallback_date = datetime.fromtimestamp(int(reference["time"])).strftime("%d/%m")
+            logger.info(f"[D1-RANGE] → FALLBACK: {fallback_date}")
+
+        msg = {
+            "type": "daily_range",
+            "symbol": symbol,
+            "high": round(float(reference["high"]), 5),
+            "low": round(float(reference["low"]), 5),
+            "open": round(float(reference["open"]), 5),
+            "close": round(float(reference["close"]), 5),
+            "time": int(reference["time"])
+        }
+
+        if hasattr(target, 'send'):
+            await target.send(json.dumps(msg))
+        else:
+            await broadcast(msg)
+            
 def is_in_active_killzone() -> bool:
     """Retorna True si la hora UTC actual está dentro de alguna killzone activa."""
     # [CRT-IMPL-1] Timezone unificado
@@ -864,13 +951,7 @@ async def strategy_scanner_task():
                                     continue
                                 logger.info(f"[CRT] SMT: divergencia confirmada - {symbol} barrio, {correlated_sym} no")
 
-                        # --- CAPA 2/3: VALIDACIÓN DE CONTEXTO DE MERCADO ---
-                        setup_name = f"Sweep {'High' if direction == 'SELL' else 'Low'} Reversal ({direction})"
-                        market_snapshot = (
-                            f"Symbol: {symbol}, Action: {direction}, Price: {price:.5f}, CRT_HIGH: {crt_high:.5f}, "
-                            f"CRT_LOW: {crt_low:.5f}, ATR: {ltf_atr:.1f}, Spread: {current_spread_points/10.0:.1f} pips."
-                        )
-                        
+                        # --- CONTEXTO DE MERCADO (CHROMA-OPT-3: informativo) ---
                         # Obtener parámetros dinámicos del bot de manera segura para hilos
                         with _config_lock:
                             lot = bot_config.lot_size
@@ -879,29 +960,30 @@ async def strategy_scanner_task():
                             threshold = bot_config.chroma_threshold
                             top_k = bot_config.chroma_top_k
 
-                        loop = asyncio.get_running_loop()
-                        validation_res = await loop.run_in_executor(
-                            None, validate_market_context, setup_name, market_snapshot, threshold, top_k
-                        )
-                        
-                        if not validation_res.get("approved", True):
-                            reason = validation_res.get("reason", "Bloqueado por exclusión vectorial.")
-                            # Evitar spamming de desestimación por contexto
-                            last_dism_time = last_scanner_action_time[symbol]["DISMISSED"]
-                            if now_time - last_dism_time > 60:
-                                last_scanner_action_time[symbol]["DISMISSED"] = now_time
-                                await broadcast({
-                                    "type": "scanner_signal",
-                                    "symbol": symbol,
-                                    "action": "DISMISSED",
-                                    "direction": direction,
-                                    "reason": f"Contexto: {reason}",
-                                    "message": f"❌ Señal desestimada en {symbol}: {reason}"
-                                })
-                                logger.info(f"Escáner: Señal desestimada en {symbol}: {reason}")
-                            continue
+                        # [CHROMA-OPT-3] ChromaDB es solo INFORMATIVO — nunca bloquea ni toca el lote.
+                        # [CHROMA-OPT-4] Llamada no bloqueante (hilo secundario).
+                        active_kz = get_active_killzone_name()
+                        try:
+                            context_result = await validate_market_context_async(
+                                symbol, direction, sweep_type, active_kz, threshold, top_k
+                            )
+                            chroma_context = context_result.get("context", "NEW")
+                        except Exception as e:
+                            chroma_context = "NEW"
+                            logger.warning(f"[CHROMA] Error en contexto (se continúa): {e}")
+                        logger.info(f"[CHROMA] Contexto: {chroma_context}")
 
-                        # --- AMBAS CAPAS APROBADAS: DISPARO AUTÓNOMO ---
+                        # El resultado se incluye en el scanner_signal para visibilidad (no detiene la señal)
+                        await broadcast({
+                            "type": "scanner_signal",
+                            "symbol": symbol,
+                            "action": "DETECTED",
+                            "direction": direction,
+                            "chroma_context": chroma_context,
+                            "message": f"Señal {direction} en {symbol} · Contexto ChromaDB: {chroma_context}",
+                        })
+
+                        # --- SEÑAL CONFIRMADA: DISPARO AUTÓNOMO (ChromaDB no la detiene) ---
                         # Calcular SL y TP usando los pips dinámicos configurados
                         if direction == "SELL":
                             sl_price = price + sl_pips * pip_value
@@ -1548,6 +1630,7 @@ async def handler(websocket):
                     "eq": anchor_ranges[symbol]["eq"],
                     "anchor_time": anchor_ranges[symbol]["anchor_time"]
                 }))
+        await emit_daily_range(websocket)
     except Exception as e:
         logger.error(f"Error al enviar history_init al cliente: {e}")
 
@@ -1744,9 +1827,7 @@ async def handler(websocket):
                     # Extraer parámetros opcionales del cliente o usar fallbacks por defecto
                     range_size_pips = float(data.get("range_size_pips", 10.0))
                     ltf_atr = float(data.get("ltf_atr", 12.0))
-                    setup_name = data.get("setup_name", f"Setup {action.upper()}")
-                    market_snapshot = data.get("market_snapshot", f"Symbol: {symbol}, Volume: {volume}, SL: {sl}, TP: {tp}")
-                    
+
                     # --- CAPA 1: VALIDACIÓN DE HARD RULES ---
                     hard_ok, hard_msg = validate_hard_rules(broker_symbol, current_spread_points, range_size_pips, ltf_atr)
                     if not hard_ok:
@@ -1760,28 +1841,19 @@ async def handler(websocket):
                         })
                         continue
                         
-                    # --- CAPA 2/3: VALIDACIÓN DE CONTEXTO DE MERCADO ---
+                    # --- CONTEXTO DE MERCADO (CHROMA-OPT-3: solo informativo, no bloquea) ---
                     with _config_lock:
                         threshold = bot_config.chroma_threshold
                         top_k = bot_config.chroma_top_k
 
-                    loop = asyncio.get_running_loop()
-                    validation_res = await loop.run_in_executor(
-                        None, validate_market_context, setup_name, market_snapshot, threshold, top_k
-                    )
-                    
-                    if not validation_res.get("approved", True):
-                        reason = validation_res.get("reason", "Bloqueado por exclusión de mercado.")
-                        error_msg = f"Rechazo Contexto: {reason}"
-                        logger.warning(f"MT5: Orden cancelada por CAPA 3 (Exclusión/Contexto): {reason}")
-                        await send_to_client(websocket, {
-                            "type": "trade_result",
-                            "success": False,
-                            "action": action,
-                            "error": error_msg
-                        })
-                        continue
-                    
+                    try:
+                        context_result = await validate_market_context_async(
+                            symbol, action.upper(), None, get_active_killzone_name(), threshold, top_k
+                        )
+                        logger.info(f"[CHROMA] Contexto (orden manual {symbol}): {context_result.get('context', 'NEW')}")
+                    except Exception as e:
+                        logger.warning(f"[CHROMA] Error en contexto (orden manual, se continúa): {e}")
+
                     price = tick.ask if action == "buy" else tick.bid
                     
                     request = {
@@ -2087,21 +2159,34 @@ async def feedback_loop_task():
                             # o usar "Web UI Setup" como fallback
                             setup_initial = deal.comment if (deal.comment and deal.comment.strip()) else "Web UI Setup"
                             
+                            # [CHROMA-OPT-2] Parsear sweep_type / killzone del comment enriquecido (CRT|sweep:..|kz:..)
+                            _sweep_t = None
+                            _kz = None
+                            if setup_initial and setup_initial.startswith("CRT"):
+                                for _part in setup_initial.split("|")[1:]:
+                                    if ":" in _part:
+                                        _k, _v = _part.split(":", 1)
+                                        if _k == "sweep":
+                                            _sweep_t = _v
+                                        elif _k == "kz":
+                                            _kz = _v
+
                             trade_data = {
                                 "symbol": symbol,
                                 "type": original_type,
                                 "outcome": outcome,
                                 "pips_result": float(pips_result),
                                 "spread": float(spread),
-                                "setup_initial": setup_initial
+                                "setup_initial": setup_initial,
+                                "sweep_type": _sweep_t,
+                                "killzone": _kz
                             }
-                            
+
                             logger.info(f"Feedback Loop: Registrando trade en ChromaDB: Posición {position_id}, "
                                         f"Resultado: {outcome} ({pips_result:.1f} pips).")
-                                        
-                            # Ejecutar la inserción en ChromaDB en un hilo ejecutor no bloqueante y esperar resultado
-                            loop = asyncio.get_running_loop()
-                            new_trade = await loop.run_in_executor(None, add_trade_experience, trade_data)
+
+                            # [CHROMA-OPT-4] Inserción no bloqueante en ChromaDB (hilo secundario)
+                            new_trade = await add_trade_experience_async(trade_data)
                             
                             processed_deals.add(deal_ticket)
                             
@@ -2153,6 +2238,12 @@ async def main():
         initialize_vector_db()
     except Exception as e:
         logger.error(f"Error al inicializar base de datos vectorial de reglas: {e}")
+
+    # [CHROMA-OPT-1] Migrar experiencias de trade a colecciones por símbolo
+    try:
+        migrate_to_symbol_collections()
+    except Exception as e:
+        logger.error(f"Error en migración a colecciones por símbolo: {e}")
 
     load_risk_config()
 

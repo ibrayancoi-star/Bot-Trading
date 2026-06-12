@@ -58,3 +58,6 @@ __pycache__/
 
 # ChromaDB local storage
 chroma_db/
+
+# Log files
+*.log

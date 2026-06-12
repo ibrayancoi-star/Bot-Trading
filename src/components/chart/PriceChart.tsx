@@ -7,6 +7,7 @@ import {
   LineSeries,
   HistogramSeries,
   CrosshairMode,
+  LineStyle,
   type IChartApi,
   type ISeriesApi,
   type IPriceLine,
@@ -91,6 +92,65 @@ interface PaneOffset {
   height: number;
 }
 
+// [CHART-VISUAL-2] Interfaces y helper para detección de Fair Value Gap (FVG)
+interface FVGZone {
+  type: "bullish" | "bearish";
+  top: number;
+  bottom: number;
+  time: number;
+  filled: boolean;
+}
+
+function detectFVGs(candles: Candle[]): FVGZone[] {
+  const fvgs: FVGZone[] = [];
+  if (candles.length < 3) return fvgs;
+
+  for (let i = 0; i < candles.length - 2; i++) {
+    const c1 = candles[i];
+    const c3 = candles[i + 2];
+
+    // FVG alcista: hueco entre high de c1 y low de c3
+    if (c3.low > c1.high) {
+      fvgs.push({
+        type: "bullish",
+        top: c3.low,
+        bottom: c1.high,
+        time: candles[i + 1].time,
+        filled: false
+      });
+    }
+
+    // FVG bajista: hueco entre low de c1 y high de c3
+    if (c3.high < c1.low) {
+      fvgs.push({
+        type: "bearish",
+        top: c1.low,
+        bottom: c3.high,
+        time: candles[i + 1].time,
+        filled: false
+      });
+    }
+  }
+
+  // Marcar FVGs que ya fueron rellenados por precio posterior
+  for (const fvg of fvgs) {
+    const laterCandles = candles.filter(c => c.time > fvg.time);
+    for (const lc of laterCandles) {
+      if (fvg.type === "bullish" && lc.low <= fvg.bottom) {
+        fvg.filled = true;
+        break;
+      }
+      if (fvg.type === "bearish" && lc.high >= fvg.top) {
+        fvg.filled = true;
+        break;
+      }
+    }
+  }
+
+  // Retornar solo los NO rellenados (los activos)
+  return fvgs.filter(f => !f.filled);
+}
+
 export function PriceChart({ symbol, timeframe }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -120,6 +180,17 @@ export function PriceChart({ symbol, timeframe }: Props) {
   const macdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const candlesRef = useRef<Candle[]>([]);
   const priceLinesMapRef = useRef<Map<string, IPriceLine>>(new Map());
+  // [CHART-VISUAL-FIX] FVG dibujado con priceLines (setMarkers no existe en esta versión)
+  const fvgLinesRef = useRef<IPriceLine[]>([]);
+
+  // [CHART-VISUAL-2] Refs para capas visuales
+  const dailyHighLineRef = useRef<IPriceLine | null>(null);
+  const dailyLowLineRef = useRef<IPriceLine | null>(null);
+  const anchorHighLineRef = useRef<IPriceLine | null>(null);
+  const anchorLowLineRef = useRef<IPriceLine | null>(null);
+  const anchorEqLineRef = useRef<IPriceLine | null>(null);
+  const sweepLineRef = useRef<IPriceLine | null>(null);
+  const lastSweepUpdateRef = useRef<number>(0);
 
   const indicators = useChartStore((s) => s.indicators);
   const hidden = useChartStore((s) => s.hidden);
@@ -130,6 +201,10 @@ export function PriceChart({ symbol, timeframe }: Props) {
   const removeIndicator = useChartStore((s) => s.removeIndicator);
   const toggleHidden = useChartStore((s) => s.toggleHidden);
   const setSettingsTarget = useChartStore((s) => s.setSettingsTarget);
+
+  // [CHART-VISUAL-2] Estados de capas visuales
+  const dailyRange = useTradingStore((s) => s.dailyRanges[symbol]);
+  const anchorRange = useTradingStore((s) => s.anchorRanges[symbol]);
 
   // Refs to avoid recreating subscribeClick on every tool change
   const toolRef = useRef(tool);
@@ -818,6 +893,141 @@ export function PriceChart({ symbol, timeframe }: Props) {
     }
   }, [positions, symbol]);
 
+  // [CHART-VISUAL-2] Capa 1: Rango Diario (D1 High/Low)
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    if (dailyHighLineRef.current) {
+      try {
+        series.removePriceLine(dailyHighLineRef.current);
+      } catch {}
+      dailyHighLineRef.current = null;
+    }
+    if (dailyLowLineRef.current) {
+      try {
+        series.removePriceLine(dailyLowLineRef.current);
+      } catch {}
+      dailyLowLineRef.current = null;
+    }
+
+    if (!dailyRange) return;
+
+    dailyHighLineRef.current = series.createPriceLine({
+      price: dailyRange.high,
+      color: "#22c55e",
+      lineStyle: LineStyle.Dashed,
+      lineWidth: 1,
+      title: "D1 High",
+      axisLabelVisible: true,
+    });
+
+    dailyLowLineRef.current = series.createPriceLine({
+      price: dailyRange.low,
+      color: "#ef4444",
+      lineStyle: LineStyle.Dashed,
+      lineWidth: 1,
+      title: "D1 Low",
+      axisLabelVisible: true,
+    });
+  }, [dailyRange, symbol]);
+
+  // [CHART-VISUAL-2] Capa 2: Rango H4 de Anclaje (CRT High/Low/EQ)
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    if (anchorHighLineRef.current) {
+      try {
+        series.removePriceLine(anchorHighLineRef.current);
+      } catch {}
+      anchorHighLineRef.current = null;
+    }
+    if (anchorLowLineRef.current) {
+      try {
+        series.removePriceLine(anchorLowLineRef.current);
+      } catch {}
+      anchorLowLineRef.current = null;
+    }
+    if (anchorEqLineRef.current) {
+      try {
+        series.removePriceLine(anchorEqLineRef.current);
+      } catch {}
+      anchorEqLineRef.current = null;
+    }
+
+    if (!anchorRange) return;
+
+    anchorHighLineRef.current = series.createPriceLine({
+      price: anchorRange.high,
+      color: "#3b82f6",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 2,
+      title: "CRT H",
+      axisLabelVisible: true,
+    });
+
+    anchorLowLineRef.current = series.createPriceLine({
+      price: anchorRange.low,
+      color: "#3b82f6",
+      lineStyle: LineStyle.Solid,
+      lineWidth: 2,
+      title: "CRT L",
+      axisLabelVisible: true,
+    });
+
+    anchorEqLineRef.current = series.createPriceLine({
+      price: anchorRange.eq,
+      color: "#eab308",
+      lineStyle: LineStyle.SparseDotted,
+      lineWidth: 1,
+      title: "EQ 50%",
+      axisLabelVisible: true,
+    });
+  }, [anchorRange, symbol]);
+
+  // [CHART-VISUAL-2] Capa 3: Zona de Sweep Esperado (naranja, con throttle de 5s)
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series || !anchorRange || !lastPrice?.value) {
+      if (sweepLineRef.current && series) {
+        try {
+          series.removePriceLine(sweepLineRef.current);
+        } catch {}
+        sweepLineRef.current = null;
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastSweepUpdateRef.current < 5000 && sweepLineRef.current) {
+      return;
+    }
+    lastSweepUpdateRef.current = now;
+
+    const currentPrice = lastPrice.value;
+    const distToHigh = Math.abs(anchorRange.high - currentPrice);
+    const distToLow = Math.abs(anchorRange.low - currentPrice);
+    const direction = distToLow < distToHigh ? "BUY" : "SELL";
+    const sweepPrice = direction === "BUY" ? anchorRange.low : anchorRange.high;
+
+    if (sweepLineRef.current) {
+      try {
+        series.removePriceLine(sweepLineRef.current);
+      } catch {}
+      sweepLineRef.current = null;
+    }
+
+    sweepLineRef.current = series.createPriceLine({
+      price: sweepPrice,
+      color: "#f97316",
+      lineStyle: LineStyle.Dotted,
+      lineWidth: 2,
+      title: `⚡ Sweep → ${direction}`,
+      axisLabelVisible: true,
+    });
+  }, [lastPrice?.value, anchorRange, symbol]);
+
   // Cursor style when drawing tools are active + reset measure on tool change
   useEffect(() => {
     if (containerRef.current) {
@@ -915,6 +1125,48 @@ export function PriceChart({ symbol, timeframe }: Props) {
     }));
   }
 
+  // [CHART-VISUAL-FIX] Capa 4: Zonas FVG dibujadas con priceLines (compatible con todas las versiones)
+  function updateFVGs() {
+    const series = candleSeriesRef.current;
+    if (!series) return;
+
+    // Limpiar FVGs anteriores
+    for (const line of fvgLinesRef.current) {
+      try { series.removePriceLine(line); } catch { /* línea ya removida */ }
+    }
+    fvgLinesRef.current = [];
+
+    // Solo mostrar FVGs en temporalidades bajas
+    const showFVG = timeframe === "1m" || timeframe === "3m" || timeframe === "5m" || timeframe === "15m" || timeframe === "30m";
+    if (!showFVG) return;
+
+    const c = candlesRef.current;
+    if (c.length < 3) return;
+
+    // Reutiliza la detección existente; dibuja los últimos 5 como pares de priceLines
+    const recent = detectFVGs(c).slice(-5);
+    for (const fvg of recent) {
+      const color = fvg.type === "bullish" ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)";
+      const topLine = series.createPriceLine({
+        price: fvg.top,
+        color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: "",
+      });
+      const bottomLine = series.createPriceLine({
+        price: fvg.bottom,
+        color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: fvg.type === "bullish" ? "FVG ▲" : "FVG ▼",
+      });
+      fvgLinesRef.current.push(topLine, bottomLine);
+    }
+  }
+
   // Load mock historical data + subscribe to simulated live ticks
   useEffect(() => {
     let unsub: (() => void) | null = null;
@@ -931,6 +1183,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
     updateEMAs();
     updateRSI();
     updateMACD();
+    updateFVGs();
     chartRef.current?.timeScale().fitContent();
     requestAnimationFrame(() => recomputePaneOffsets());
 
@@ -975,6 +1228,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
         updateEMAs();
         updateRSI();
         updateMACD();
+        updateFVGs();
         const prev = arr[arr.length - 2] ?? lastCandle;
         setLastPrice({
           value: k.close,
@@ -1026,6 +1280,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
         updateEMAs();
         updateRSI();
         updateMACD();
+        updateFVGs();
         chartRef.current?.timeScale().fitContent();
         
         const last = historyData[historyData.length - 1];

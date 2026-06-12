@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import time
+import asyncio
 import chromadb
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
@@ -12,11 +13,79 @@ client = chromadb.PersistentClient(path=DB_DIR)
 # 2. Utilizar el modelo de embedding 'sentence-transformers/all-MiniLM-L6-v2' de forma 100% local
 emb_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# 3. Crear o recuperar la colección "crt_knowledge"
+# 3. Colección global de REGLAS curadas (crt_rules_curated.md). NO se elimina (backup).
+#    Las experiencias de trade pasan a colecciones por símbolo (ver get_collection_for_symbol).
 collection = client.get_or_create_collection(
     name="crt_knowledge",
     embedding_function=emb_fn
 )
+
+
+# [CHROMA-OPT-1] Colecciones por símbolo con distancia coseno
+_symbol_collections: dict = {}
+
+def get_collection_for_symbol(symbol: str):
+    """Colección dedicada por símbolo (espacio coseno). Cacheada en proceso."""
+    name = f"crt_knowledge_{symbol}"
+    cached = _symbol_collections.get(name)
+    if cached is not None:
+        return cached
+    col = client.get_or_create_collection(
+        name=name,
+        embedding_function=emb_fn,
+        metadata={"hnsw:space": "cosine"}
+    )
+    _symbol_collections[name] = col
+    return col
+
+
+def migrate_to_symbol_collections():
+    """
+    [CHROMA-OPT-1] Migra experiencias de trade de la colección global a
+    colecciones por símbolo. Idempotente: solo migra registros que aún no
+    existan en la colección destino. La colección global NO se elimina (backup).
+    Registros sin metadata 'symbol' se descartan.
+    """
+    try:
+        res = collection.get(where={"source": "execution_history"})
+    except Exception as e:
+        print(f"[CHROMA] Migración omitida (sin colección global o error): {e}")
+        return
+
+    ids = res.get("ids") or []
+    if not ids:
+        print("[CHROMA] Migración: no hay experiencias en la colección global.")
+        return
+
+    docs = res.get("documents") or []
+    metas = res.get("metadatas") or []
+    per_symbol_counts: dict = {}
+
+    for i in range(len(ids)):
+        meta = metas[i] if i < len(metas) else None
+        symbol = (meta or {}).get("symbol")
+        if not symbol:
+            continue  # sin symbol → se descarta
+        target = get_collection_for_symbol(symbol)
+        # Evitar duplicados: no reinsertar si el id ya existe en destino
+        try:
+            existing = target.get(ids=[ids[i]])
+            if existing and existing.get("ids"):
+                continue
+        except Exception:
+            pass
+        target.add(
+            ids=[ids[i]],
+            documents=[docs[i] if i < len(docs) else ""],
+            metadatas=[meta]
+        )
+        per_symbol_counts[symbol] = per_symbol_counts.get(symbol, 0) + 1
+
+    if per_symbol_counts:
+        resumen = ", ".join(f"{n} a {s}" for s, n in per_symbol_counts.items())
+        print(f"[CHROMA] Migración: {resumen}")
+    else:
+        print("[CHROMA] Migración: 0 registros migrados (ya migrados o sin symbol).")
 
 def initialize_vector_db(md_path="crt_rules_curated.md"):
     """
@@ -91,65 +160,54 @@ def initialize_vector_db(md_path="crt_rules_curated.md"):
     else:
         print("[ContextEngine] No se encontraron reglas válidas en el archivo para indexar.")
 
-def validate_market_context(setup_name: str, market_snapshot: str, chroma_threshold: float = 1.1, chroma_top_k: int = 2) -> dict:
+def validate_market_context(symbol: str, direction: str, sweep_type: str = None, killzone: str = None,
+                            chroma_threshold: float = 1.1, chroma_top_k: int = 2) -> dict:
     """
-    Realiza una consulta por similitud combinando setup y market_snapshot.
-    Recupera los resultados más cercanos (n_results=chroma_top_k).
-    Si la distancia es < chroma_threshold y el fragmento es de tipo 'capa_3_exclusion' o contiene palabras
-    como 'invalida', 'prohibido' o 'cancelar', devuelve:
-      {"approved": False, "reason": "Motivo del bloqueo", "distance": float}
-    De lo contrario, devuelve:
-      {"approved": True, "reason": "Validación correcta", "distance": float}
+    [CHROMA-OPT-3] Clasificación INFORMATIVA — NUNCA modifica el lotaje ni bloquea.
+    Consulta la colección dedicada del símbolo (distancia coseno) con un query
+    estructurado clave-valor, filtrando por symbol/direction en metadata.
+
+    Retorna {"context": "NEW"|"WIN_MATCH"|"LOSS_MATCH", "approved": True,
+             "distance": float, "reason": str}.
+
+    'approved' es siempre True: la señal jamás se detiene por ChromaDB. El campo
+    se mantiene por compatibilidad con los llamadores; el lotaje lo decide el usuario.
     """
-    # [CRT-IMPL-7] Direccion como discriminador fuerte
-    direction_token = "BUY" if "BUY" in setup_name.upper() else "SELL" if "SELL" in setup_name.upper() else ""
-    setup_name_weighted = f"{direction_token} {direction_token} {direction_token} | {setup_name}" if direction_token else setup_name
-    query_text = f"Setup: {setup_name_weighted}. Market Context: {market_snapshot}"
+    # [CHROMA-OPT-2] Query estructurado clave-valor
+    query_text = (
+        f"SYM:{symbol}|DIR:{direction}|"
+        f"SWEEP:{sweep_type or 'NONE'}|KZ:{killzone or 'NONE'}"
+    )
 
     try:
-        results = collection.query(
+        col = get_collection_for_symbol(symbol)
+        # [CHROMA-OPT-2] Filtro $and por symbol + direction (aislamiento estricto)
+        results = col.query(
             query_texts=[query_text],
-            n_results=chroma_top_k
+            n_results=chroma_top_k,
+            where={"$and": [{"symbol": symbol}, {"trade_type": direction}]}
         )
     except Exception as e:
         print(f"[ContextEngine] Error en la consulta de similitud: {e}")
-        return {"approved": True, "reason": f"Error en consulta: {e}", "distance": 0.0}
+        return {"context": "NEW", "approved": True, "distance": 0.0, "reason": f"Error en consulta: {e}"}
 
-    # Si no hay resultados de búsqueda, se aprueba por defecto
-    if not results or not results["distances"] or len(results["distances"][0]) == 0:
-        return {"approved": True, "reason": "No se encontraron reglas en la base vectorial", "distance": 0.0}
+    # Sin coincidencias → setup nuevo
+    if not results or not results.get("distances") or len(results["distances"][0]) == 0:
+        return {"context": "NEW", "approved": True, "distance": 0.0, "reason": "Sin experiencias previas similares"}
 
     min_distance = float(results["distances"][0][0])
+    best_meta = (results["metadatas"][0][0] if results.get("metadatas") else {}) or {}
+    outcome = str(best_meta.get("outcome", "")).upper()
 
-    for i in range(len(results["distances"][0])):
-        distance = float(results["distances"][0][i])
-        metadata = results["metadatas"][0][i] if results["metadatas"] else {}
-        document = results["documents"][0][i] if results["documents"] else ""
+    # Solo cuenta como match si la distancia es suficientemente cercana
+    if min_distance < chroma_threshold and outcome in ("WIN", "LOSS"):
+        context = "WIN_MATCH" if outcome == "WIN" else "LOSS_MATCH"
+        reason = f"Experiencia previa {outcome} similar (dist={min_distance:.3f})"
+    else:
+        context = "NEW"
+        reason = f"Sin match cercano (dist={min_distance:.3f})"
 
-        meta_type = metadata.get("type", "") if metadata else ""
-        doc_lower = document.lower()
-
-        # Condición de bloqueo: distancia baja (< chroma_threshold) y
-        # (tipo exclusion o palabras clave en el fragmento)
-        is_exclusion = (meta_type == "capa_3_exclusion")
-        has_block_keywords = any(kw in doc_lower for kw in ["invalida", "prohibido", "cancelar"])
-
-        if distance < chroma_threshold and (is_exclusion or has_block_keywords):
-            reason_msg = f"Regla/Bloqueo detectado: {metadata.get('title', 'Regla de exclusión')}."
-            # Si el documento tiene palabras clave específicas o es una experiencia de pérdida
-            if "loss" in doc_lower:
-                reason_msg = f"Historial de pérdidas (LOSS): {document}"
-            return {
-                "approved": False,
-                "reason": reason_msg,
-                "distance": distance
-            }
-
-    return {
-        "approved": True,
-        "reason": "Validación correcta",
-        "distance": min_distance
-    }
+    return {"context": context, "approved": True, "distance": min_distance, "reason": reason}
 
 def add_trade_experience(trade_data: dict):
     """
@@ -158,43 +216,34 @@ def add_trade_experience(trade_data: dict):
     Etiqueta la experiencia como 'capa_3_exclusion' si outcome es LOSS.
     """
     symbol = trade_data.get("symbol", "N/A")
-    trade_type = trade_data.get("type", "N/A")
+    trade_type = str(trade_data.get("type", "N/A")).upper()
     outcome = str(trade_data.get("outcome", "N/A")).upper()
     pips_result = trade_data.get("pips_result", 0.0)
     spread = trade_data.get("spread", 0.0)
     setup_initial = trade_data.get("setup_initial", "N/A")
+    sweep_type = trade_data.get("sweep_type")
+    killzone = trade_data.get("killzone")
 
-    # [CRT-IMPL-7] Direccion como discriminador fuerte
-    direction_token = str(trade_type).upper()
-    setup_initial_weighted = f"{direction_token} {direction_token} {direction_token} | {setup_initial}" if direction_token in ["BUY", "SELL"] else setup_initial
-
-    # Redactar string semántico explicativo del resultado
-    semantic_str = (
-        f"Trade cerrado con resultado de {outcome} en el par {symbol} para la operación de {trade_type} "
-        f"utilizando el setup inicial {setup_initial_weighted}. El trade resultó en {pips_result} pips de beneficio/pérdida "
-        f"con un spread promedio de {spread} pips."
+    # [CHROMA-OPT-2] Texto estructurado clave-valor (mismo formato que la query)
+    doc_text = (
+        f"SYM:{symbol}|DIR:{trade_type}|RESULT:{outcome}|"
+        f"SWEEP:{sweep_type or 'NONE'}|KZ:{killzone or 'NONE'}|"
+        f"PIPS:{round(float(pips_result), 1)}|SPREAD:{round(float(spread), 1)}"
     )
 
-    if outcome == "LOSS":
-        semantic_str += (
-            f" ATENCIÓN: El setup {setup_initial} falló en estas condiciones de mercado, resultando en pérdida (LOSS). "
-            f"Este comportamiento invalida futuros setups similares bajo el mismo contexto. Se prohíbe operar "
-            f"si las confluencias se asemejan a este trade."
-        )
-        meta_type = "capa_3_exclusion"
-    else:
-        semantic_str += f" El setup {setup_initial} se validó exitosamente con ganancias (WIN)."
-        meta_type = "capa_2_semantica"
+    meta_type = "capa_3_exclusion" if outcome == "LOSS" else "capa_2_semantica"
 
     # Generar ID única para la experiencia del trade
     exp_id = f"trade_experience_{outcome.lower()}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    
+
     metadata = {
         "type": meta_type,
         "title": f"Trade Experience {outcome} - {symbol} - {setup_initial}",
         "symbol": symbol,
         "trade_type": trade_type,
         "outcome": outcome,
+        "sweep_type": sweep_type or "NONE",
+        "killzone": killzone or "NONE",
         "pips_result": float(pips_result),
         "spread": float(spread),
         "setup_initial": setup_initial,
@@ -202,17 +251,27 @@ def add_trade_experience(trade_data: dict):
         "source": "execution_history"
     }
 
-    collection.add(
+    # [CHROMA-OPT-1] Guardar en la colección dedicada del símbolo
+    col = get_collection_for_symbol(symbol)
+    col.add(
         ids=[exp_id],
-        documents=[semantic_str],
+        documents=[doc_text],
         metadatas=[metadata]
     )
-    print(f"[ContextEngine] Experiencia de trade {outcome} agregada con ID {exp_id} bajo la etiqueta '{meta_type}'.")
+    print(f"[ContextEngine] Experiencia de trade {outcome} agregada a 'crt_knowledge_{symbol}' con ID {exp_id}.")
     return {
         "id": exp_id,
-        "document": semantic_str,
+        "document": doc_text,
         "metadata": metadata
     }
+
+
+# [CHROMA-OPT-4] Wrappers no bloqueantes (operaciones ChromaDB en hilo secundario)
+async def add_trade_experience_async(*args, **kwargs):
+    return await asyncio.to_thread(add_trade_experience, *args, **kwargs)
+
+async def validate_market_context_async(*args, **kwargs):
+    return await asyncio.to_thread(validate_market_context, *args, **kwargs)
 
 def get_historical_trades_text(limit=20) -> list:
     """

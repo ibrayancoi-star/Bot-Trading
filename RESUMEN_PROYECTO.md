@@ -1,6 +1,6 @@
 # Documentación Técnica — Dashboard de Trading Híbrido CRT
 
-> **Última actualización:** 2026-06-10 · **Versión del documento:** v3.0
+> **Última actualización:** 2026-06-11 (tarde) · **Versión del documento:** v3.2
 >
 > Leyenda de estado: ✅ IMPLEMENTADO · 🔶 PARCIAL · ❌ PENDIENTE
 >
@@ -743,6 +743,103 @@ Esto separa el espacio semántico por dirección: los LOSS de BUY ya no atraen c
 
 ---
 
+## 🧪 Optimización ChromaDB (11 junio 2026) — ✅ IMPLEMENTADO
+
+> Verificado leyendo `context_engine.py` y la integración en `mt5_bridge.py` (scanner). Esta revisión cambia el **paradigma** de ChromaDB: deja de ser un guardián que bloquea señales para convertirse en un clasificador de contexto **informativo**.
+
+### CHROMA-OPT-1 — Colecciones dedicadas por símbolo (distancia coseno) ✅
+
+`get_collection_for_symbol(symbol)` (`context_engine.py` L27-39) crea/cachea una colección `crt_knowledge_{symbol}` (ej. `crt_knowledge_EURUSD`, `crt_knowledge_GBPUSD`) con `metadata={"hnsw:space": "cosine"}`. La colección global `crt_knowledge` se conserva como backup de reglas curadas y **no se elimina**.
+
+`migrate_to_symbol_collections()` (L42-88) migra al arranque las experiencias de trade (`source: execution_history`) de la colección global a las colecciones por símbolo. Es **idempotente** (no reinserta ids ya existentes en destino), descarta registros sin metadata `symbol`, y emite un log con el resumen de registros movidos (`[CHROMA] Migración: N a EURUSD, M a GBPUSD`). Importada y ejecutada desde `mt5_bridge.py` (L14).
+
+### CHROMA-OPT-2 — Embeddings estructurados clave-valor ✅
+
+Antes: texto descriptivo largo (`"Setup: Sweep High Reversal (SELL). Market Context: Symbol: EURUSD, Price: ..."`).
+Ahora: formato compacto clave-valor, **idéntico** en query y en registro, para máxima consistencia semántica:
+
+```
+# Query (validate_market_context, L177-180):
+SYM:EURUSD|DIR:SELL|SWEEP:TBS|KZ:london
+
+# Documento almacenado (add_trade_experience, L228-232):
+SYM:EURUSD|DIR:SELL|RESULT:LOSS|SWEEP:TBS|KZ:london|PIPS:-15.0|SPREAD:1.2
+```
+
+Además, las queries aplican un **filtro estricto en metadata** (`where={"$and": [{"symbol": symbol}, {"trade_type": direction}]}`, L188) que aísla por símbolo **y** dirección a nivel de base de datos — no solo por ponderación semántica.
+
+### CHROMA-OPT-3 — Clasificación informativa (NEW / WIN_MATCH / LOSS_MATCH), sin bloqueo ✅
+
+`validate_market_context()` (L163-210) **ya no detiene señales**. Retorna `{"context": "NEW"|"WIN_MATCH"|"LOSS_MATCH", "approved": True, "distance": float, "reason": str}`. El campo `approved` es **siempre `True`** (se conserva por compatibilidad con los llamadores).
+
+- **NEW** — sin experiencias previas similares (o sin match cercano).
+- **WIN_MATCH** — experiencia previa ganadora similar (`distance < chroma_threshold` y `outcome == WIN`).
+- **LOSS_MATCH** — experiencia previa perdedora similar (`outcome == LOSS`).
+
+En el scanner (`mt5_bridge.py` L963-984): el resultado se computa de forma **no bloqueante** (try/except que degrada a `NEW` ante cualquier error), se loguea (`[CHROMA] Contexto: ...`) y se incluye como campo `chroma_context` en el evento `scanner_signal` (acción `DETECTED`) para visibilidad en la UI. El comentario del código lo deja explícito: *"ChromaDB es solo INFORMATIVO — nunca bloquea ni toca el lote"* (L963). El disparo autónomo de la orden ocurre **después**, sin condicionarse al contexto (L986: *"SEÑAL CONFIRMADA: DISPARO AUTÓNOMO (ChromaDB no la detiene)"*).
+
+### Gestión de riesgo — el lotaje es SIEMPRE el de la UI ✅
+
+`volume = lot` (`mt5_bridge.py` L1014, comentado *"Lotaje controlado desde el frontend"*). ChromaDB **no modifica el lote** bajo ninguna circunstancia. Decisión de diseño explícita del usuario.
+
+> Nota: el único ajuste de lotaje que sí existe es el multiplicador **TBS/TWS** (L1017-1019), que es una feature CRT independiente de ChromaDB y solo actúa con `require_candle_confirmation` activo.
+
+### CHROMA-OPT-4 — Operaciones no bloqueantes (`asyncio.to_thread`) ✅
+
+Wrappers async (`context_engine.py` L270-274): `validate_market_context_async()` y `add_trade_experience_async()` ejecutan las operaciones ChromaDB (CPU-bound: embedding + búsqueda HNSW) en un **hilo secundario** vía `asyncio.to_thread`, evitando bloquear el event loop del bridge. El scanner usa exclusivamente las versiones async (L967, L1850).
+
+### Problema que resolvió
+
+1. **Contaminación cruzada por símbolo:** un LOSS de EURUSD podía recuperarse al evaluar GBPUSD si el contexto semántico era similar. Resuelto con colecciones por símbolo + filtro `where` estricto.
+2. **Sobre-bloqueo semántico masivo:** el paradigma anterior bloqueaba señales por similitud de distancia con cualquier LOSS, deteniendo operaciones válidas. Resuelto eliminando el bloqueo: ChromaDB ahora solo clasifica el contexto, nunca detiene la señal ni altera el riesgo.
+
+---
+
+## 🎨 Decoraciones Visuales del Gráfico (11 junio 2026) — ✅ IMPLEMENTADO
+
+> Verificado en `src/components/chart/PriceChart.tsx`. Todas las decoraciones se dibujan con `series.createPriceLine()` (líneas horizontales nativas), persistentes al cambiar de temporalidad.
+
+### Capa 1 — Rango Diario D1 de referencia (líneas punteadas verde/rojo) ✅
+
+`PriceChart.tsx` L896-933. Lee `dailyRanges[symbol]` del store (`dailyRange`). Dibuja dos `priceLine`:
+- **D1 High** — verde punteada (`title: "D1 High"`).
+- **D1 Low** — rojo punteada (`title: "D1 Low"`).
+
+Se recrean al cambiar `dailyRange` o `symbol`.
+
+### Capa 2 — Rango H4 de anclaje (CRT High/Low + EQ amarilla) ✅
+
+`PriceChart.tsx` L935-984. A partir del `anchorRange` del símbolo dibuja:
+- **CRT High / CRT Low** — líneas azules.
+- **EQ 50%** — línea amarilla punteada (`title: "EQ 50%"`, equilibrium del rango H4).
+
+### Capa 3 — Indicador de sweep esperado (naranja) ✅
+
+`PriceChart.tsx` L990-1025. `sweepLineRef` mantiene una única `priceLine` naranja en el extremo del rango H4 hacia donde se espera el barrido (`anchorRange.low` si dirección BUY, `anchorRange.high` si SELL). Se actualiza con throttle de 5s y se limpia si no hay dirección activa.
+
+### Capa 4 — Zonas FVG (Fair Value Gap) con pares de priceLines ✅
+
+`detectFVGs()` (L104-151) detecta huecos de 3 velas (alcista: hueco entre high de c1 y low de c3; bajista: inverso) y **filtra solo los FVGs no rellenados** por precio posterior. `updateFVGs()` (L1128-1167):
+- Solo se muestran en temporalidades bajas (`1m`, `3m`, `5m`, `15m`, `30m`).
+- Máximo **5** FVGs más recientes (`.slice(-5)`).
+- Cada FVG = par de `priceLines` (top + bottom): **verde** (`rgba(34,197,94,0.4)`) si alcista, **rojo** (`rgba(239,68,68,0.4)`) si bajista. Títulos `FVG ▲` / `FVG ▼`.
+
+### Bug resuelto: `series.setMarkers` no existe en esta versión de Lightweight Charts ✅
+
+El primer intento de FVG usaba `series.setMarkers()`, método **inexistente** en la API de esta versión (error en runtime). Se reemplazó por `series.createPriceLine()` (comentado `[CHART-VISUAL-FIX]`, L183, L1128), compatible con todas las versiones y coherente con el resto de decoraciones.
+
+### Lógica de la vela D1 de referencia (backend `emit_daily_range`) ✅
+
+`mt5_bridge.py` L596-676. Selecciona la **última vela D1 CERRADA** que cumple **dos** condiciones simultáneas:
+1. **Contención:** el precio actual (`current_bid`) está dentro del rango de mecha (`wick_low ≤ bid ≤ wick_high`).
+2. **No rota por cuerpo:** ninguna vela cerrada posterior superó su high/low con el **cuerpo** (`max/min(open, close)`), no con la mecha.
+
+La vela **en formación nunca participa** (ni como candidata ni como evaluadora — `copy_rates_from_pos(..., start_pos=1)`). Logs `[D1-RANGE]` detallan cada evaluación (⏭️ fuera de rango / ❌ rota por cuerpo / ✅ válida / fallback). Emitido como mensaje `daily_range` (broadcast o al cliente que conecta).
+
+> **ACLARACIÓN OPERATIVA:** el rango D1 es **SOLO VISUAL** (referencia para el operador). El bot **opera únicamente con el rango H4 de anclaje por calendario** (Fase 1 del scanner). El rango D1 no entra en ninguna decisión de ejecución.
+
+---
+
 ## 🧩 Estructura Técnica de la Metodología CRT (por Módulo)
 
 ### Distribución del Código CRT
@@ -973,11 +1070,35 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 
 | Problema | Estado | Detalle (verificado en código) |
 |----------|--------|-------------------------------|
-| **ChromaDB — contaminación cruzada por símbolo** | ❌ Fix pendiente | Las queries en `context_engine.py` (L111-112) usan `query_texts=[query_text]` + `n_results`, **sin `where` que filtre por `symbol`**. La dirección sí se pondera como token repetido en el texto (L105-106), pero **no hay aislamiento por símbolo**: una experiencia de EURUSD puede recuperarse al evaluar GBPUSD si el contexto semántico es similar. El metadata `symbol` se guarda (L195) pero no se usa como filtro de consulta. |
+| **ChromaDB — contaminación cruzada por símbolo** | ✅ RESUELTO (11 jun tarde) | Resuelto en la optimización ChromaDB: colecciones dedicadas por símbolo (`crt_knowledge_{symbol}`) + filtro estricto `where={"$and": [{"symbol": symbol}, {"trade_type": direction}]}` en las queries (`context_engine.py` L188). Ya no hay recuperación cruzada entre pares. Ver sección "Optimización ChromaDB". |
 | **Docstring obsoleto en `is_in_active_killzone()`** | 🔶 Cosmético | El docstring dice "hora UTC actual" (L592) pero el código ya usa `_to_canary()` (L594). El comportamiento es correcto (Canary); solo el comentario quedó desactualizado. |
 | **`maxPositions` / bloqueo del scanner cuentan posiciones manuales** | 🔶 Pendiente | Ver tabla de Gaps: el límite y el salto de símbolo no filtran por comment `CRT`, así que operaciones manuales afectan al bot. |
 | **Handlers `risk_guard_alert` / `anchor_update` sin frontend** | ❌ Pendiente | El backend los emite; `mock-feed.ts` no los procesa. No hay campo `anchorRanges` en el store. |
 | **IStrategy registrada pero no conectada** | 🔶 Pendiente | Ver sección IStrategy: el scanner sigue con lógica inline. |
+
+---
+
+## ❌ Intento Fallido: Rangos Estructurales con Bias (11 junio 2026) — ❌ PENDIENTE
+
+> Lección aprendida documentada para un reintento futuro. **Ninguno de estos cambios está en el código** — el usuario los rechazó en su totalidad. Verificado: `crt_logic.py` **no contiene** `is_range_broken`, `find_structural_range`, `compute_range_bias` ni `effective_bias`; `mt5_bridge.py` **no contiene** `_structural_ranges` ni `update_structural_ranges`. El scanner sigue anclando por **calendario H4** sin cambios.
+
+### Objetivo (no alcanzado)
+
+Reemplazar el anclaje H4 por calendario con una **selección estructural** del rango (última vela no rota por cuerpo, con tolerancia de mecha y retorno al rango) y añadir un **sistema de bias direccional D1/H4** como **filtro operativo del scanner** (no solo visual).
+
+### Resultado
+
+La implementación del agente **no cumplió la especificación** del usuario. El usuario **RECHAZÓ todos los cambios** (rechazo limpio, sin restos en el código). Lección: el prompt monolítico falló — se reintentará con **micro-prompts más pequeños y aislados**.
+
+### Especificación a preservar (para reintento futuro)
+
+Copiada tal cual de la solicitud original del usuario:
+
+- **Rango válido** = última vela cerrada cuyo max/min de **mecha** no fue superado **con cuerpo** por velas posteriores cerradas.
+- **Tolerancia:** exceso de cuerpo ≤ **2.5 pips (EURUSD)** / ≤ **3 pips (GBPUSD)** con retorno al rango → el rango sigue válido hasta llegar al extremo opuesto.
+- **Bias D1:** max tomado → el bias se mantiene hasta tomar el min (y viceversa).
+- **Bias H4 con confluencia D1:** se mantiene hasta completar la expansión al extremo opuesto del rango D1.
+- Las reglas deben ser **operativas** (filtro del scanner), **no solo visuales**.
 
 ---
 
@@ -996,13 +1117,571 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 | 8 | **Cableado de `ScannerLog`** | `scannerSignals` + `addScannerSignal` en store, handler `scanner_signal` en `mock-feed.ts` |
 | 9 | **Scripts de verificación** | `verify_crt_behavior.py` y `diagnostic_crt.py` (cliente WS de diagnóstico del scanner) |
 | 10 | **Documentación v2.0 → v3.0** | Verificación contra código real, reclasificación de parámetros, secciones de problemas conocidos e historial |
+| 11 | **Fix: sticky header opaco en HistoryTable** | Rediseño de `thead` para aplicar `sticky`/`bg-zinc-950`/`border-b` por celda individual (`<th>`), eliminando transparencia de filas al hacer scroll (ver detalle abajo) |
+| 12 | **Script de auditoría `audit_crt.py`** | Cliente WebSocket que intercepta `BOT_CONFIG_UPDATE` y muestra qué features CRT están realmente activas vs decorativas, con resumen semáforo |
+| 13 | **Optimización ChromaDB completa (11 jun tarde, 4 cambios)** | (1) Colecciones por símbolo con distancia coseno + migración automática; (2) embeddings estructurados clave-valor (`SYM\|DIR\|RESULT\|SWEEP\|KZ`); (3) clasificación informativa NEW/WIN_MATCH/LOSS_MATCH (deja de bloquear señales; lotaje siempre de la UI); (4) operaciones no bloqueantes con `asyncio.to_thread` |
+| 14 | **Decoraciones visuales del gráfico (11 jun tarde)** | Rango D1 (verde/rojo punteado), rango H4 de anclaje (azul + EQ amarilla), indicador de sweep esperado (naranja), zonas FVG en M1/M5/M15 (pares de priceLines, solo no rellenados, máx 5) |
+| 15 | **Iteraciones de la lógica de vela D1 de referencia (4 versiones)** | Iterado hasta la regla final: última vela CERRADA con contención de precio + no superada por el CUERPO de velas posteriores; la vela en formación nunca participa. Logs `[D1-RANGE]` |
+| 16 | **Fix error `setMarkers` en `PriceChart.tsx`** | `series.setMarkers` no existe en esta versión de Lightweight Charts → reemplazado por `series.createPriceLine` para los FVG (`[CHART-VISUAL-FIX]`) |
+| 17 | **Intento RECHAZADO de rangos estructurales + bias** | Reimplementación estructural del anclaje + bias D1/H4 como filtro operativo. No cumplió la especificación → usuario rechazó todos los cambios (rechazo limpio). Spec preservada para reintento con micro-prompts |
 
 ---
 
-## 🎯 Pendiente / Próximos Pasos
+## 🗓️ Sesión del 2026-06-11 — Implementaciones Detalladas
+
+Esta sección documenta con precisión técnica todo lo ejecutado durante la sesión del 11 de junio de 2026, agrupado por commit y módulo afectado.
+
+---
+
+### Commit `ea7a1ac` — feat: CRT methodology v2 - TBS/TWS, real history, IStrategy architecture
+
+**Alcance:** 18 archivos, +1815 / -622 líneas. La iteración de mayor peso técnico del proyecto hasta la fecha.
+
+---
+
+#### 1. Unificación de Timezone (`mt5_bridge.py` L14-26)
+
+**Problema previo:** `is_in_active_killzone()` comparaba `hora UTC` × `hora Canaria` en distintos puntos del código, pudiendo divergir en ±1h dependiendo del DST activo en `Atlantic/Canary`.
+
+**Solución implementada:**
+
+```python
+import pytz as _pytz
+_TZ_UTC    = _pytz.timezone("UTC")
+_TZ_CANARY = _pytz.timezone("Atlantic/Canary")
+
+def _to_canary(utc_naive_dt):
+    return utc_naive_dt.replace(tzinfo=_TZ_UTC).astimezone(_TZ_CANARY)
+```
+
+El helper `_to_canary()` recibe un `datetime` naive (como los que retorna `datetime.datetime.utcnow()`) y devuelve un `datetime` aware en hora Canaria, respetando automáticamente DST. Todas las validaciones horarias del scanner (L591, L633, killzones, Nine AM model) ahora usan exclusivamente esta función. Se eliminó la duplicidad de rutas timezone que existía entre el pre-filtro (`is_in_active_killzone`) y la validación de Capa 1 (`validate_hard_rules`).
+
+---
+
+#### 2. Import seguro de `crt_logic.py` con flag `CRT_LOGIC_AVAILABLE` (`mt5_bridge.py` L28-37)
+
+```python
+try:
+    from crt_logic import classify_sweep_type, check_smt_divergence
+    CRT_LOGIC_AVAILABLE = True
+except ImportError as e:
+    CRT_LOGIC_AVAILABLE = False
+    _crt_logic_import_error = str(e)
+```
+
+El log del resultado se emite diferido (L104-107), después de que el `logger` ya está configurado. Todo bloque de lógica CRT avanzada se protege con `if CRT_LOGIC_AVAILABLE`, garantizando degradación elegante al comportamiento básico de 1-tick si el módulo no carga (por ejemplo, en entornos sin `crt_logic.py` instalado).
+
+---
+
+#### 3. Nuevos flags en `BotConfig` dataclass (`mt5_bridge.py` L62-68)
+
+Se añadieron 5 campos con `default=False` (conservador):
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `require_candle_confirmation` | `bool` | Activa buffer `_sweep_pending` + clasificación TBS/TWS |
+| `use_dynamic_sl` | `bool` | SL calculado sobre mecha de vela_2 (+ 1.5 pips buffer) |
+| `use_crt_targets` | `bool` | TP1 = EQ (50%), TP2 = extremo opuesto del rango H4 |
+| `partial_close_at_eq` | `bool` | Cierra `partial_close_pct`% del volumen cuando precio toca EQ |
+| `smt_divergence_enabled` | `bool` | Filtra la señal si ambos pares correlacionados barren simultáneamente |
+
+El default `False` asegura que el bot al arrancar siga funcionando exactamente igual que antes de esta sesión. El usuario activa cada feature desde la UI.
+
+---
+
+#### 4. Implementación `classify_sweep_type()` en `crt_logic.py` (L211-245)
+
+Función pura (sin side effects). Evalúa **vela_2** (la que barre el nivel) y **vela_3** (la vela de confirmación) para clasificar el tipo de barrido:
+
+```python
+body_ratio = abs(vela_2["close"] - vela_2["open"]) / (vela_2["high"] - vela_2["low"])
+```
+
+| Condición sobre vela_2 | Tipo | Confianza |
+|------------------------|------|-----------|
+| Cuerpo cruza nivel + body_ratio < 20% | TBS | 1.00 — mecha limpia de rechazo |
+| Cuerpo cruza nivel + body_ratio ≥ 20% | TBS | 0.65 — cierre fuera pero cuerpo grande |
+| Solo mecha cruza + body_ratio < 20% | TWS | 0.75 — mecha penetra, cuerpo adentro |
+| Solo mecha cruza + body_ratio ≥ 20% | TWS | 0.50 — mecha y cuerpo ambiguos |
+| Mecha no cruza o vela_3 no recupera | INVALID | 0.00 — descartado |
+
+**La regla del 20%** es el discriminador clave entre una trampa institucional (mecha limpia, cuerpo pequeño) y un impulso direccional (cuerpo grande, sin trampa).
+
+---
+
+#### 5. Buffer `_sweep_pending` — Confirmación por Vela 3 (`mt5_bridge.py` L163-165, L732-804)
+
+```python
+_sweep_pending: dict = {}   # { symbol: {direction, vela_2, crt_high, crt_low, timestamp} }
+```
+
+**Flujo cuando `require_candle_confirmation=True`:**
+
+```
+Ciclo 1 (tick supera CRT level):
+  → Se detecta el sweep
+  → Se descarga la vela M1 actual como vela_2
+  → Se almacena en _sweep_pending[symbol] con timestamp
+  → El ciclo CONTINÚA sin evaluar Capa 1/2 aún
+
+Ciclos 2..N (hasta 180s después):
+  → Se comprueba si existe _sweep_pending[symbol]
+  → Se descarga la vela M1 más reciente como vela_3_candidate
+  → Se verifica que vela_3.time > vela_2.time (es una nueva vela)
+  → Se llama classify_sweep_type(vela_2, vela_3, crt_h, crt_l, direction)
+  → Si INVALID → del _sweep_pending[symbol] → descartado
+  → Si TBS/TWS → continúa hacia Capa 1/2/3 con sweep_type y sweep_confidence
+```
+
+**Timeout de 180 segundos:** si la vela 3 no aparece o no confirma en 3 minutos, el pendiente se descarta automáticamente. Esto evita sweeps "zombie" que contaminen el siguiente ciclo de mercado.
+
+---
+
+#### 6. `calculate_dynamic_sl()` (`crt_logic.py` L246-254)
+
+SL posicionado detrás del extremo de la mecha de la vela que efectuó el barrido:
+
+```python
+# BUY (sweep del low):
+sl_price = vela_2["low"] - buffer_pips * pip_value
+
+# SELL (sweep del high):
+sl_price = vela_2["high"] + buffer_pips * pip_value
+```
+
+El `buffer_pips=1.5` añade margen para spread y microslippage sin alejarse del nivel invalidado por la mecha. Solo se aplica si el SL calculado es más favorable que el precio actual (validación de sanidad en L912-919 del bridge).
+
+---
+
+#### 7. `calculate_crt_targets()` (`crt_logic.py` L255-267)
+
+Targets basados en la geometría del rango H4:
+
+```python
+eq   = crt_low + 0.5 * (crt_high - crt_low)   # Equilibrium = 50% del rango
+tp1  = eq                                        # Primer objetivo (cierre parcial aquí)
+tp2  = crt_low  if direction == "SELL" else crt_high   # Extremo opuesto (objetivo final)
+```
+
+Cuando `use_crt_targets=True`:
+- `tp_price` se establece en `tp2` para la orden inicial.
+- `_crt_eq_target[symbol] = tp1` se almacena para el monitor de cierre parcial en EQ.
+
+---
+
+#### 8. `check_smt_divergence()` (`crt_logic.py` L241-244)
+
+```python
+def check_smt_divergence(primary_swept: bool, correlated_swept: bool) -> bool:
+    return primary_swept and not correlated_swept
+```
+
+Divergencia institucional: si **solo el par primario** barró su nivel y el correlacionado **no** → es una trampa genuina. Si **ambos** barrieron → movimiento por flujo macro, no trampa. El scanner verifica `EURUSD↔GBPUSD` (L845-863): si no hay divergencia, emite `DISMISSED` con razón `SMT: sin divergencia institucional`.
+
+---
+
+#### 9. Multiplicadores de lotaje TBS/TWS (`mt5_bridge.py` L935-939)
+
+```python
+if sweep_type and CRT_LOGIC_AVAILABLE:
+    multiplier = bot_config.model_tbs_risk_multiplier if sweep_type == "TBS" else bot_config.model_tws_risk_multiplier
+    volume = round(volume * multiplier, 2)
+    volume = max(volume, 0.01)  # piso de seguridad
+```
+
+- TBS (cuerpo fuera del rango, mayor certeza) → `model_tbs_risk_multiplier` (default 1.0x).
+- TWS (solo mecha, menor certeza) → `model_tws_risk_multiplier` (default 0.5x).
+- El `max(volume, 0.01)` previene que un multiplicador `0.0` envíe un lote de cero, que rechazaría MT5.
+
+---
+
+#### 10. Comment enriquecido en órdenes — `_build_crt_comment()` (`mt5_bridge.py` L653-661)
+
+```python
+def _build_crt_comment(sweep_type, sweep_confidence) -> str:
+    parts = ["CRT"]
+    if sweep_type:   parts.append(f"sweep:{sweep_type}")
+    if confidence:   parts.append(f"conf:{sweep_confidence:.2f}")
+    parts.append(f"kz:{get_active_killzone_name()}")
+    return "|".join(parts)[:31]   # límite de 31 chars de MT5
+```
+
+Ejemplo de output: `CRT|sweep:TBS|conf:1.00|kz:london`
+
+Esto reemplaza el anterior comment genérico `Auto SELL Reversal`. El comment enriquecido permite a `send_trade_history()` reconstruir el `crt_meta` de cada deal cerrado, habilitando el desglose de métricas TBS vs TWS en la tabla de historial.
+
+---
+
+#### 11. `get_active_killzone_name()` (`mt5_bridge.py` L628-649)
+
+Helper puro que retorna `"london"`, `"newyork"`, `"asian"`, `"overlap"` o `"none"` según la hora Canaria actual y las killzones activas en `bot_config`. Usa `_to_canary()` internamente. Necesario tanto para `_build_crt_comment()` como para futuros logs de análisis.
+
+---
+
+#### 12. Validación `maxPositions` total (`mt5_bridge.py` L688-694)
+
+```python
+if bot_config.max_positions > 0:
+    all_positions = mt5.positions_get()
+    total_open = len(all_positions) if all_positions else 0
+    if total_open >= bot_config.max_positions:
+        await asyncio.sleep(1.0)
+        continue
+```
+
+El scanner ahora sale del ciclo completo (no solo del símbolo) si el total de posiciones abiertas alcanza el límite configurado. Esto incluye posiciones manuales, lo cual es una decisión conservadora deliberada (bloqueo como piso de seguridad).
+
+> ⚠️ Limitación conocida: cuenta posiciones manuales. La discriminación por comment `CRT` sigue pendiente (ver Problemas Conocidos).
+
+---
+
+#### 13. Cierre parcial en EQ + SL a Breakeven (`mt5_bridge.py` L1094-1120)
+
+Variables de control:
+
+```python
+_crt_eq_target: dict = {}   # { symbol: precio_eq }
+_eq_done: set = set()        # tickets ya parcialmente cerrados
+```
+
+Lógica en `positions_broadcaster()` (evaluada a ~1Hz):
+
+```python
+for pos in positions:
+    eq_price = _crt_eq_target.get(pos.symbol)
+    if not eq_price or pos.ticket in _eq_done: continue
+    
+    hit_eq = (pos.type == BUY  and current >= eq_price) or
+             (pos.type == SELL and current <= eq_price)
+    
+    if hit_eq:
+        vol_cerrar = round(pos.volume * (bot_config.partial_close_pct / 100), 2)
+        if vol_cerrar >= 0.01:
+            mt5.order_send(cierre_parcial)             # cierra X% del volumen
+            mt5.order_send({"sl": pos.price_open})    # mueve SL a breakeven
+            _eq_done.add(pos.ticket)
+```
+
+**Purga de `_eq_done`:** al final del ciclo se hace `_eq_done &= {t.ticket for t in positions}`, eliminando tickets de posiciones ya cerradas para no crecer indefinidamente.
+
+---
+
+#### 14. Risk Guard conectado a `maxDailyLoss` de la UI (`mt5_bridge.py` L1252-1281)
+
+```python
+effective_daily_loss_pct = (
+    bot_config.max_daily_loss
+    if bot_config.max_daily_loss > 0
+    else risk_config.get("max_daily_loss_pct", 4.5)   # fallback a config_crt.json
+)
+effective_total_loss_pct = (
+    bot_config.max_daily_loss * 2    # convención: total = 2× diario
+    if bot_config.max_daily_loss > 0
+    else risk_config.get("max_total_loss_pct", 8.0)
+)
+```
+
+La flag `_risk_guard_logged` impide que el mensaje de log de límites efectivos se repita en cada tick (spam a 10Hz).
+
+---
+
+#### 15. `send_trade_history()` — Sistema de Historial Real (`mt5_bridge.py` L1363-1490)
+
+Fuente de datos: `mt5.history_deals_get(date_from, date_to)` con ventana configurable (default 30 días).
+
+**Procesamiento por deal:**
+
+1. Filtra solo deals de **cierre** (`entry in (1, 2)`).
+2. Empareja con el deal de apertura usando `position_id`.
+3. Calcula `duration_s = d.time - open_deal.time`.
+4. **Clasifica origen** por comment:
+   - Empieza con `CRT` o contiene `scanner` → `"bot"`
+   - Contiene `CRT_EQ_PARTIAL` → `"bot_partial"`
+   - Resto → `"manual"`
+5. Calcula **pips** según `DEAL_TYPE` y `pip_value` del símbolo.
+6. Parsea `crt_meta` del comment enriquecido (split por `|`).
+7. Recupera SL/TP originales desde `mt5.history_orders_get()` por `position_id`.
+
+**Métricas calculadas y enviadas:**
+
+```
+total, wins, losses, win_rate, total_profit, total_pips,
+avg_win, avg_loss, profit_factor, avg_duration_s, max_dd_trade,
+bot_trades, manual_trades, tbs_count, tbs_wr, tws_count, tws_wr
+```
+
+El campo `tbs_wr` / `tws_wr` requiere que el comment de la orden haya sido generado con `_build_crt_comment()` (contiene `sweep:TBS` o `sweep:TWS`). Trades anteriores a esta sesión mostrarán `tbs_count=0`.
+
+**Frecuencia de envío:** `history_full` al conectar un nuevo cliente y en broadcast cada 30s (6 iteraciones × 5s en `feedback_loop_task`).
+
+---
+
+#### 16. Nuevos tipos e interfaces en `trading-store.ts`
+
+**`ScannerSignal`** — Señal emitida por el scanner del bridge:
+
+```typescript
+interface ScannerSignal {
+  id: string;                                           // único: symbol-action-timestamp-random
+  action: "DETECTED" | "DISMISSED" | "EXECUTED" | "FAILED";
+  symbol: string;
+  direction?: string;
+  price?: number;
+  reason?: string;
+  message?: string;
+  timestamp: number;
+}
+```
+
+**`HistoryTrade`** — Trade real de MT5 con clasificación de origen:
+
+```typescript
+interface HistoryTrade {
+  ticket: number; symbol: string; direction: "BUY" | "SELL";
+  volume: number; open_price: number; close_price: number;
+  open_time: string; close_time: string; duration_s: number;
+  profit: number; pips: number; commission: number; swap: number; net_profit: number;
+  origin: "bot" | "bot_partial" | "manual";
+  comment: string; sl: number; tp: number;
+  crt_meta?: Record<string, string>;
+}
+```
+
+**`TradeMetrics`** — Métricas agregadas:
+
+```typescript
+interface TradeMetrics {
+  total: number; wins: number; losses: number; win_rate: number;
+  total_profit: number; total_pips: number; avg_win: number; avg_loss: number;
+  profit_factor: number; avg_duration_s: number; max_dd_trade: number;
+  bot_trades: number; manual_trades: number;
+  tbs_count: number; tbs_wr: number; tws_count: number; tws_wr: number;
+}
+```
+
+**Acciones nuevas en el store:**
+- `setTradeHistory(trades)` — reemplaza el historial completo (usado por `history_full`).
+- `setTradeMetrics(metrics)` — guarda el objeto de métricas calculadas.
+- `addScannerSignal(signal)` — prepend con cap a 100 señales (`slice(0, 100)`).
+
+**Nuevos campos en `BotConfig`** (flags CRT avanzados con default `false`):
+`requireCandleConfirmation`, `useDynamicSl`, `useCrtTargets`, `partialCloseAtEq`, `smtDivergenceEnabled`.
+
+---
+
+#### 17. Handlers nuevos en `mock-feed.ts`
+
+```typescript
+} else if (data.type === "history_full") {
+    // Reemplaza tradeHistory con historial real de MT5 + métricas
+    useTradingStore.getState().setTradeHistory(data.trades || []);
+    if (data.metrics) useTradingStore.getState().setTradeMetrics(data.metrics);
+
+} else if (data.type === "scanner_signal") {
+    // Construye ScannerSignal y lo añade al panel ScannerLog
+    useTradingStore.getState().addScannerSignal({
+        id: `${data.symbol}-${data.action}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        action: data.action ?? "DETECTED",
+        symbol: data.symbol ?? "?",
+        direction: data.direction, price: data.price,
+        reason: data.reason, message: data.message,
+        timestamp: Date.now(),
+    });
+}
+```
+
+El `id` aleatorio con `Math.random().toString(36)` previene colisiones de keys en React cuando dos señales del mismo símbolo llegan en el mismo millisegundo.
+
+---
+
+#### 18. Fixes de escala de precios en `PriceChart.tsx`
+
+**[UI-FIX-1] `priceFormat` con 5 decimales** para velas y todas las EMAs:
+
+```typescript
+const emaPriceFormat = { type: "price" as const, precision: 5, minMove: 0.00001 };
+// Aplicado a: CandlestickSeries + ema20/50/200 + ema9/21
+```
+
+**[UI-FIX-1] `localization.priceFormatter`:**
+
+```typescript
+localization: { priceFormatter: (price: number) => price.toFixed(5) }
+```
+
+Asegura que el tooltip y la crosshair muestren 5 decimales (`1.08542`) en lugar de 2 (`1.09`), crítico para pares Forex.
+
+**[UI-FIX-3] `scaleMargins` y `minimumWidth`:**
+
+```typescript
+rightPriceScale: {
+    ticksVisible: true,
+    minimumWidth: 65,
+    scaleMargins: { top: 0.1, bottom: 0.1 }
+}
+```
+
+Añade padding del 10% arriba y abajo para que los niveles extremos de las EMAs no queden cortados por el borde.
+
+---
+
+#### 19. Arquitectura IStrategy Pluggable (`strategies/base_strategy.py`, `strategies/crt_strategy.py`)
+
+**Interfaces abstractas:**
+
+```python
+# base_strategy.py
+class IStrategy(ABC):
+    name: str = "base"
+    @abstractmethod
+    def evaluate(self, ctx: MarketContext) -> StrategySignal: ...
+    def on_trade_closed(self, profit: float, setup_context: dict): ...
+
+@dataclass
+class MarketContext:
+    symbol: str; bid: float; ask: float; spread_points: float
+    atr_pips: float; crt_high: float; crt_low: float; eq: float
+    anchor_time: str; candles_m1: list
+
+@dataclass
+class StrategySignal:
+    approved: bool; direction: str; reason: str
+    sweep_type: str = ""; confidence: float = 0.0
+    sl_price: float = 0.0; tp1_price: float = 0.0; tp2_price: float = 0.0
+    lot_multiplier: float = 1.0
+```
+
+**Registro por decorador:**
+
+```python
+STRATEGY_REGISTRY: dict[str, IStrategy] = {}
+
+def register_strategy(cls):
+    STRATEGY_REGISTRY[cls.name] = cls()
+    return cls
+
+@register_strategy
+class CRTStrategy(IStrategy):
+    name = "crt"
+    def evaluate(self, ctx) -> StrategySignal: ...
+```
+
+**`CRTStrategy.evaluate()`** integra: `classify_sweep_type()`, `calculate_dynamic_sl()`, `calculate_crt_targets()`. Es la primera estrategia concreta del registry.
+
+**Estado:** Registrada correctamente. El scanner (`strategy_scanner_task`) **aún NO** la invoca — sigue usando la lógica inline. La migración `scanner → IStrategy` es el siguiente paso (P3 de Prioridad Media).
+
+---
+
+#### 20. Scripts de herramienta: `verify_crt_behavior.py`
+
+Script de simulación local que no requiere MT5. Prueba directamente las funciones de `crt_logic.py` con datos sintéticos para los 4 casos de TBS/TWS:
+
+```python
+# Caso 1: TBS limpio (body_ratio < 20%)
+vela_2 = {"open": 1.0810, "high": 1.0820, "close": 1.0808, "low": 1.0805, "time": T}
+# → Esperado: TBS con confidence=1.00
+```
+
+Permite verificar que `classify_sweep_type()` y `calculate_dynamic_sl()` dan el output esperado antes de conectar al bot real.
+
+---
+
+### Commit `8e7ac83` — docs: update technical documentation to v3.0 + UI fixes
+
+**Alcance:** 3 archivos, +178 / -49 líneas.
+
+---
+
+#### 21. Fix sticky header opaco en `HistoryTable.tsx` — `[HISTORY-FIX-4]`
+
+**Problema:** El `<thead>` usaba `className="... sticky top-0 z-10"` a nivel de elemento `<tr>` / contenedor, pero Tailwind CSS aplica `sticky` de forma efectiva **solo** cuando está en cada celda individual `<th>`. Resultado: las filas de datos se veían "transparentes" a través del header al hacer scroll.
+
+**Causa técnica:** La especificación de `position: sticky` en CSS requiere que el elemento sticky tenga sus propios bordes definidos. Un `<thead>` sticky sin fondo explícito en cada `<th>` permite que los elementos debajo se pinten sobre él.
+
+**Fix aplicado:**
+
+```tsx
+// Antes:
+<thead className="... sticky top-0 z-10">
+  <tr>
+    <th className="px-4 py-3">Ticket</th>
+
+// Después:
+<thead className="text-xs text-zinc-500 uppercase">
+  <tr>
+    <th className="sticky top-0 z-20 bg-zinc-950 px-4 py-3 border-b border-zinc-800">Ticket</th>
+```
+
+Cambios clave por celda:
+- `sticky top-0` en cada `<th>` → aplica sticky correctamente.
+- `z-20` → z-index superior a cualquier contenido de fila (`z-10`).
+- `bg-zinc-950` → fondo sólido opaco que tapa las filas al hacer scroll.
+- `border-b border-zinc-800` → separador visual entre header y datos.
+- Se añadió `border-collapse` al `<table>` para que los bordes de celdas sean contiguos.
+
+---
+
+#### 22. Script de auditoría `audit_crt.py`
+
+Cliente WebSocket especializado que escucha `BOT_CONFIG_UPDATE` del bridge y produce un informe de estado de la metodología CRT en tiempo real:
+
+```
+══════════════════════════════════════════════════
+AUDITORÍA DE METODOLOGÍA CRT
+══════════════════════════════════════════════════
+
+── DETECCIÓN DE SWEEP ──
+  Confirmación por vela:    ❌ OFF → sweep por tick (1 solo tick)
+  Multiplicador TBS:        1.0x (NO se aplica sin confirmación)
+  Multiplicador TWS:        0.5x (NO se aplica sin confirmación)
+
+── GESTIÓN DE RIESGO ──
+  SL dinámico (mecha):      ❌ OFF → SL fijo en pips
+  Targets CRT (EQ/extremo): ❌ OFF → TP fijo en pips
+  Cierre parcial en EQ:     ❌ OFF → sin cierre parcial
+  Trailing stop:            ❌ DECORATIVO (sin lógica implementada)
+
+── RESUMEN ──
+  ❌ CRT NO ACTIVO — el bot opera con sweep por tick y SL/TP fijos
+     Para activar CRT real, enciende en la UI:
+     1. Confirmación por Vela (TBS/TWS)
+     2. Usar SL Dinámico
+     3. Usar Objetivos CRT
+══════════════════════════════════════════════════
+```
+
+Diferencia con `diagnostic_crt.py`: mientras `diagnostic_crt.py` muestra el estado del mercado (ticks, anchors, señales), `audit_crt.py` muestra qué features del bot están **realmente activas** vs cuáles son decorativas — útil para verificar la configuración antes de operar en LIVE.
+
+---
+
+### Resumen de archivos modificados hoy
+
+| Archivo | Tipo de cambio | Impacto |
+|---------|---------------|---------|
+| `mt5_bridge.py` | +421 / -0 líneas | Timezone unificado, flags CRT, buffer sweep, cierre parcial EQ, Risk Guard ↔ UI, historial real, comments enriquecidos, helpers kz/comment |
+| `crt_logic.py` | +54 líneas | `classify_sweep_type`, `check_smt_divergence`, `calculate_dynamic_sl`, `calculate_crt_targets` |
+| `context_engine.py` | +11 / -0 líneas | Discriminación direccional (token triplicado BUY/SELL en queries y en registro de feedback) |
+| `src/lib/store/trading-store.ts` | +105 / -0 líneas | Tipos `ScannerSignal`, `HistoryTrade`, `TradeMetrics`; flags CRT en `BotConfig`; acciones `setTradeHistory`, `setTradeMetrics`, `addScannerSignal` |
+| `src/lib/data/mock-feed.ts` | +20 / -0 líneas | Handlers `history_full` y `scanner_signal` |
+| `src/components/chart/PriceChart.tsx` | +23 / -0 líneas | `priceFormat` 5 decimales, `localization.priceFormatter`, `scaleMargins`, `minimumWidth` |
+| `src/components/history/HistoryTable.tsx` | +22 / -20 líneas | Fix sticky opaco: `sticky`/`bg-zinc-950`/`z-20`/`border-b` por celda `<th>` |
+| `src/components/history/HistoryRow.tsx` | refactor | Ajuste menor para HistoryTrade |
+| `src/components/scanner/ScannerLog.tsx` | +74 líneas | Panel de señales del scanner (nuevo componente) |
+| `src/components/layout/LeftSidebar.tsx` | +95 / -0 líneas | Flags CRT en el modal de configuración |
+| `src/components/positions/PositionsTable.tsx` | +4 líneas | Ajuste menor |
+| `src/components/layout/BottomPanel.tsx` | +3 líneas | Ajuste menor |
+| `strategies/base_strategy.py` | +44 líneas | `IStrategy`, `MarketContext`, `StrategySignal`, `STRATEGY_REGISTRY`, `@register_strategy` |
+| `strategies/crt_strategy.py` | +24 líneas | `CRTStrategy` (primera implementación) |
+| `verify_crt_behavior.py` | +136 líneas | Suite de tests unitarios locales para `crt_logic.py` |
+| `diagnostic_crt.py` | +86 líneas | Cliente WS de diagnóstico de mercado |
+| `audit_crt.py` | +101 líneas | Cliente WS de auditoría de configuración CRT activa |
+| `CRT optimizado.md` | +58 líneas | Referencia metodológica de la estrategia CRT institucional |
+
+---
 
 ### Prioridad Alta
-- **P1 — Fix ChromaDB discriminación símbolo/dirección:** Añadir `where={"symbol": symbol}` (o filtro equivalente) a las queries de `context_engine.py` para eliminar la contaminación cruzada entre pares. La discriminación direccional ya está; falta la de símbolo.
+- **P1 — Reintentar rangos estructurales + bias direccional con micro-prompts aislados:** Reimplementar la especificación de "rangos estructurales con bias" (ver sección "Intento Fallido") dividida en micro-prompts pequeños y verificables uno a uno. Lección clave: el prompt monolítico falló y fue rechazado por completo.
+- **P1b — ✅ Fix ChromaDB discriminación símbolo/dirección (COMPLETADO 11 jun tarde):** Resuelto con colecciones por símbolo + filtro `where` por símbolo y dirección. Tanto la discriminación direccional como la de símbolo están implementadas.
 - **P2 — Verificar pipeline completo con flags CRT activos:** Probar end-to-end con `require_candle_confirmation`, `use_dynamic_sl`, `use_crt_targets`, `smt_divergence_enabled` y `partial_close_at_eq` encendidos (usar `verify_crt_behavior.py` / `diagnostic_crt.py`).
 - **P2b — Handlers `risk_guard_alert` / `anchor_update` y filtro de manuales:** Cablear los handlers faltantes en `mock-feed.ts` y hacer que el bloqueo del scanner filtre posiciones por comment `CRT`.
 
