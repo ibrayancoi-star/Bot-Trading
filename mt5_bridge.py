@@ -31,7 +31,7 @@ def _to_canary(utc_naive_dt):
 # Las nuevas funcionalidades CRT usarán crt_logic.py exclusivamente.
 # NOTA: el log se emite después de configurar el logger (ver bloque post-logger)
 try:
-    from crt_logic import classify_sweep_type, check_smt_divergence
+    from crt_logic import classify_sweep_type, check_smt_divergence, calculate_dynamic_sl, calculate_crt_targets
     CRT_LOGIC_AVAILABLE = True
     _crt_logic_import_error = None
 except ImportError as e:
@@ -1166,7 +1166,8 @@ def get_account_data():
 
 async def positions_broadcaster():
     """Bucle que consulta y transmite las posiciones abiertas actuales."""
-    global MT5_INITIALIZED
+    # [CRT-IMPL-4-FIX] Declarar globales usadas en el cierre parcial
+    global MT5_INITIALIZED, _eq_done, _crt_eq_target
     while True:
         if MT5_INITIALIZED:
             try:
@@ -1739,11 +1740,11 @@ async def handler(websocket):
                         bot_config.smt_divergence_check = bool(payload.get("smtDivergenceCheck", bot_config.smt_divergence_check))
                         
                         # [CRT-IMPL-3] WS update para nuevos parámetros
-                        bot_config.require_candle_confirmation = bool(payload.get("require_candle_confirmation", bot_config.require_candle_confirmation))
-                        bot_config.use_dynamic_sl = bool(payload.get("use_dynamic_sl", bot_config.use_dynamic_sl))
-                        bot_config.use_crt_targets = bool(payload.get("use_crt_targets", bot_config.use_crt_targets))
-                        bot_config.partial_close_at_eq = bool(payload.get("partial_close_at_eq", bot_config.partial_close_at_eq))
-                        bot_config.smt_divergence_enabled = bool(payload.get("smt_divergence_enabled", bot_config.smt_divergence_enabled))
+                        bot_config.require_candle_confirmation = bool(payload.get("requireCandleConfirmation", bot_config.require_candle_confirmation))
+                        bot_config.use_dynamic_sl = bool(payload.get("useDynamicSl", bot_config.use_dynamic_sl))
+                        bot_config.use_crt_targets = bool(payload.get("useCrtTargets", bot_config.use_crt_targets))
+                        bot_config.partial_close_at_eq = bool(payload.get("partialCloseAtEq", bot_config.partial_close_at_eq))
+                        bot_config.smt_divergence_enabled = bool(payload.get("smtDivergenceEnabled", bot_config.smt_divergence_enabled))
 
                         # [BYPASS CAPA 1] — Killzones dinámicas
                         bot_config.london_start   = payload.get("londonStart",   bot_config.london_start)
