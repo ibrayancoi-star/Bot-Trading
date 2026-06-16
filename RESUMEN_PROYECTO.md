@@ -1,10 +1,92 @@
 # Documentación Técnica — Dashboard de Trading Híbrido CRT
 
-> **Última actualización:** 2026-06-11 (tarde) · **Versión del documento:** v3.2
+> **Última actualización:** 2026-06-16 · **Versión del documento:** v4.0
+> **Directorio del proyecto:** `Bot-Trading` (renombrado desde `tradingview-gratis-master`)
 >
 > Leyenda de estado: ✅ IMPLEMENTADO · 🔶 PARCIAL · ❌ PENDIENTE
 >
 > *Todas las marcas ✅/🔶/❌ de este documento se verificaron leyendo el código fuente real (junio 2026).*
+
+---
+
+## 🆕 Sesión 2026-06-15/16 — Activación real de la metodología CRT institucional
+
+Esta sesión cerró la brecha más grande del proyecto: la "Metodología CRT Institucional v2"
+estaba implementada en el backend desde el 11 de junio pero **no era alcanzable desde la UI**
+por una combinación de tres bugs encadenados. Tras los tres fixes, los flags `requireCandleConfirmation`,
+`useDynamicSl`, `useCrtTargets`, `partialCloseAtEq` y `smtDivergenceEnabled` —y por extensión
+los multiplicadores TBS/TWS y los targets EQ/extremo— operan tal como están especificados.
+
+### Resumen ejecutivo de la sesión
+
+| # | Cambio | Archivo | Impacto |
+|---|--------|---------|---------|
+| 1 | **Fix mapeo camelCase ↔ snake_case** de los 5 flags CRT en el handler `BOT_CONFIG_UPDATE` | [mt5_bridge.py:1742-1746](mt5_bridge.py) | Los 5 flags ahora llegan al bridge (antes caían al default `False`). Reactiva TBS/TWS, SL dinámico, targets CRT, cierre parcial en EQ y filtro SMT |
+| 2 | **Fix `global _eq_done, _crt_eq_target`** en `positions_broadcaster` | [mt5_bridge.py:1169-1170](mt5_bridge.py) | Elimina `cannot access local variable '_eq_done'` que rompía el broadcast de posiciones cuando `partialCloseAtEq` estaba activo |
+| 3 | **Fix import faltante** de `calculate_dynamic_sl` y `calculate_crt_targets` desde `crt_logic` | [mt5_bridge.py:34](mt5_bridge.py) | Elimina `NameError` al activar `useDynamicSl` o `useCrtTargets` (sin este fix, los flags llegaban pero rompían en ejecución) |
+| 4 | **Refactor UI**: selector de estrategia → texto fijo "CRT Institucional" | [LeftSidebar.tsx:386-389](src/components/layout/LeftSidebar.tsx) | Elimina las 4 opciones decorativas (Scalping/Swing/Breakout/Reversal) que no controlaban nada. El campo `strategy` del store y del payload se conserva |
+| 5 | **Auditoría completa de parámetros UI → backend** | `PLAN_MEJORAS.md` | Mapeo `archivo:línea` de cada uno de los 36 controles. Origen de los 3 fixes anteriores |
+| 6 | **Auditoría comparativa LIVE vs BACKTEST** | `BACKTEST_AUDIT.md` | Catálogo de divergencias fase a fase entre el scanner del bridge y el motor de backtesting |
+| 7 | **Herramienta `replay_missed.py`** | (nueva) | Script para reconstruir condiciones que el bot vio o ignoró |
+| 8 | **Mejora de `diagnostic_crt.py`** | +119 / −83 | Telemetría más rica del estado del scanner |
+| 9 | **Rename del directorio raíz** del proyecto | `tradingview-gratis-master` → `Bot-Trading` | Alineación con la identidad real del producto |
+
+### Cadena causal — por qué los tres fixes son inseparables
+
+El usuario podía activar "Confirmación por Vela (TBS/TWS)" en la UI desde el 11 de junio, pero
+en realidad ocurría esto:
+
+1. **Bug A (mapeo):** el payload llegaba con `requireCandleConfirmation` (camelCase) pero el
+   handler hacía `payload.get("require_candle_confirmation", …)` → la clave no se encontraba y
+   el flag conservaba el default `False`.
+2. **Bug B (latente):** si el usuario lograba activarlo (o si el bug A se arreglaba sin tocar B),
+   `positions_broadcaster` accedía a `_eq_done` sin declararlo `global`. El augmented assignment
+   `_eq_done &= open_tickets` marca toda la función como teniendo `_eq_done` local, así que las
+   lecturas previas (`ticket in _eq_done`, `_eq_done.add(ticket)`) lanzaban `cannot access
+   local variable '_eq_done'`. Bastaba activar `partialCloseAtEq` para romper el broadcast.
+3. **Bug C (latente):** el bloque de SL dinámico/targets en el scanner llamaba a
+   `calculate_dynamic_sl` y `calculate_crt_targets` que **nunca habían sido importadas** desde
+   `crt_logic`. Bastaba activar `useDynamicSl` o `useCrtTargets` para que el scanner explotara
+   con `NameError` al detectar una señal.
+
+Resumen: el bug A actuaba como "seguro" que ocultaba los bugs B y C. Arreglar solo el mapeo
+sin arreglar B y C habría llevado al bot a un estado **peor** que antes (excepciones en ruta
+caliente). Por eso los tres se aplicaron en la misma sesión.
+
+### Verificación recomendada antes de operar en LIVE
+
+```powershell
+# Terminal 1 (con MT5 abierto):
+python mt5_bridge.py
+# Terminal 2:
+python audit_crt.py        # confirma qué flags están activos según el bridge
+python diagnostic_crt.py   # telemetría del scanner
+```
+
+Activar en la UI **uno a uno** los 5 flags y aplicar entre cada cambio. En el log del bridge
+deberías ver progresivamente:
+- `[CRT] {sym} sweep pendiente de confirmacion … esperando Vela 3`
+- `[CRT] {sym} sweep CONFIRMADO: TBS (confianza 1.00)` (o TWS)
+- `[CRT] SL dinamico aplicado: <precio>`
+- `[CRT] Targets: EQ=… TP1=… TP2=…`
+- `[CRT] Lotaje ajustado por TBS: <vol> (xN)`
+- `[CRT] {sym} cierre parcial en EQ: <vol> lotes, SL a breakeven`
+
+y **ningún** `NameError` ni `cannot access local variable`.
+
+### Documentos complementarios creados en la sesión
+
+- **[`PLAN_MEJORAS.md`](PLAN_MEJORAS.md)** — Auditoría de los 36 parámetros de la UI con su
+  rastreo completo `LeftSidebar.tsx` → store → `mock-feed.ts` → handler bridge → consumidor.
+  Clasificación: ✅ 23 ACTIVOS, 🔶 3 CONDICIONALES, ❌ 5 DECORATIVOS, ⚠️ 5 HUÉRFANOS. Incluye
+  decisiones pendientes (campo `smtDivergenceCheck` redundante, doble cierre parcial, etiqueta
+  "UTC" engañosa, inconsistencia de `overlap`).
+- **[`BACKTEST_AUDIT.md`](BACKTEST_AUDIT.md)** — Comparativa fase a fase de la lógica LIVE vs
+  BACKTEST. Destaca que el backtest usa `close` como bid y ask (perdiendo spread real), opera
+  vela-a-vela en lugar de tick, no aplica cooldown de 180 s entre trades y solo abre 1 posición
+  máxima — todas son fuentes de divergencia entre métricas simuladas y comportamiento real.
+
+---
 
 ### Stack Tecnológico
 
@@ -967,9 +1049,11 @@ La lógica CRT se distribuye en 3 módulos Python que separan responsabilidades:
 
 | Funcionalidad | Dónde se define | Estado |
 |---------------|----------------|--------|
-| **Selector de estrategia** | `STRATEGY_REGISTRY` / `useStrategyStore` | Registry existe, scanner no lo usa |
+| **Selector de estrategia** | `STRATEGY_REGISTRY` / `useStrategyStore` | Registry existe, scanner no lo usa. **Selector eliminado de la UI el 15 jun**; el campo `strategy` sobrevive en el store con default fijo (`scalping`) y sigue viajando en el payload sin efecto. |
 | **Trailing Stop** | `BotConfig.trailing_stop` / `trailingStop` | Se guarda, no se usa |
 | **Confluencia M1/M15** | `BotConfig.hybrid_m1_m15_confluence` | Se guarda, no se evalúa |
+| **`smtDivergenceCheck` (campo viejo)** | `BotConfig.smt_divergence_check` | Llega al bridge pero no se consume; el real es `smtDivergenceEnabled` |
+| **`partialClose` (toggle viejo)** | `BotConfig.partial_close` | Coexiste con `partialCloseAtEq` (nuevo, funcional). Solo el nuevo opera |
 | **ATR body ratio** | `config_crt.json → min_body_to_atr_ratio` | Definido en JSON, no evaluado |
 
 ---
@@ -1071,10 +1155,18 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 | Problema | Estado | Detalle (verificado en código) |
 |----------|--------|-------------------------------|
 | **ChromaDB — contaminación cruzada por símbolo** | ✅ RESUELTO (11 jun tarde) | Resuelto en la optimización ChromaDB: colecciones dedicadas por símbolo (`crt_knowledge_{symbol}`) + filtro estricto `where={"$and": [{"symbol": symbol}, {"trade_type": direction}]}` en las queries (`context_engine.py` L188). Ya no hay recuperación cruzada entre pares. Ver sección "Optimización ChromaDB". |
+| **Mapeo camelCase ↔ snake_case de los 5 flags CRT** | ✅ RESUELTO (15 jun) | El handler `BOT_CONFIG_UPDATE` ahora lee las 5 claves en camelCase ([mt5_bridge.py:1742-1746](mt5_bridge.py)). Los flags `requireCandleConfirmation`, `useDynamicSl`, `useCrtTargets`, `partialCloseAtEq` y `smtDivergenceEnabled` llegan correctamente. Ver sección de la sesión 15/16 de junio. |
+| **`positions_broadcaster` crashea con `_eq_done` local** | ✅ RESUELTO (15 jun) | Añadido `global _eq_done, _crt_eq_target` ([mt5_bridge.py:1169-1170](mt5_bridge.py)). El cierre parcial en EQ y el broadcast de posiciones ya no rompen al activar `partialCloseAtEq`. |
+| **`NameError` por import faltante de `calculate_dynamic_sl` / `calculate_crt_targets`** | ✅ RESUELTO (15 jun) | Añadidas al import desde `crt_logic` ([mt5_bridge.py:34](mt5_bridge.py)). Activar `useDynamicSl` o `useCrtTargets` ya no rompe el scanner. |
+| **Selector de estrategia decorativo en la UI** | ✅ RESUELTO (15 jun) | Reemplazado por texto fijo "CRT Institucional" en [LeftSidebar.tsx:386-389](src/components/layout/LeftSidebar.tsx). El campo `strategy` del store y del payload se conserva con el default `"scalping"` (sin efecto real porque el scanner sigue ejecutando CRT inline). |
 | **Docstring obsoleto en `is_in_active_killzone()`** | 🔶 Cosmético | El docstring dice "hora UTC actual" (L592) pero el código ya usa `_to_canary()` (L594). El comportamiento es correcto (Canary); solo el comentario quedó desactualizado. |
 | **`maxPositions` / bloqueo del scanner cuentan posiciones manuales** | 🔶 Pendiente | Ver tabla de Gaps: el límite y el salto de símbolo no filtran por comment `CRT`, así que operaciones manuales afectan al bot. |
-| **Handlers `risk_guard_alert` / `anchor_update` sin frontend** | ❌ Pendiente | El backend los emite; `mock-feed.ts` no los procesa. No hay campo `anchorRanges` en el store. |
+| **Handlers `risk_guard_alert` / `anchor_update` sin frontend** | 🔶 Parcial | `anchor_update` y `daily_range` ya tienen handler en [mock-feed.ts:612-614](src/lib/data/mock-feed.ts). `risk_guard_alert` sigue sin handler dedicado — el backend lo emite pero la UI no lo distingue de otros mensajes. |
 | **IStrategy registrada pero no conectada** | 🔶 Pendiente | Ver sección IStrategy: el scanner sigue con lógica inline. |
+| **Etiqueta "UTC" engañosa en killzones** | 🔶 Pendiente | La UI rotula los horarios como "(UTC)" pero el bridge compara contra hora Canary (`_to_canary`). En verano (DST) difieren en 1 hora. Ver `PLAN_MEJORAS.md` §5. |
+| **Inconsistencia de killzone `overlap`** | 🔶 Pendiente | El pre-filtro acepta `overlap` (12:00-15:00 fijo) pero `validate_hard_rules` no la incluye; no tiene input de horario en la UI. Ver `PLAN_MEJORAS.md` §5. |
+| **Campo `smtDivergenceCheck` redundante en el store** | 🔶 Pendiente | El campo real consumido por el scanner es `smtDivergenceEnabled`. `smtDivergenceCheck` llega al bridge pero no se consume. Candidato a eliminación. Ver `PLAN_MEJORAS.md` §2. |
+| **Doble cierre parcial (`partialClose` viejo + `partialCloseAtEq` nuevo)** | 🔶 Pendiente | Coexisten dos toggles que parecen hacer lo mismo; solo el nuevo funciona. Candidato a unificación. Ver `PLAN_MEJORAS.md` §2. |
 
 ---
 
@@ -1124,6 +1216,13 @@ Copiada tal cual de la solicitud original del usuario:
 | 15 | **Iteraciones de la lógica de vela D1 de referencia (4 versiones)** | Iterado hasta la regla final: última vela CERRADA con contención de precio + no superada por el CUERPO de velas posteriores; la vela en formación nunca participa. Logs `[D1-RANGE]` |
 | 16 | **Fix error `setMarkers` en `PriceChart.tsx`** | `series.setMarkers` no existe en esta versión de Lightweight Charts → reemplazado por `series.createPriceLine` para los FVG (`[CHART-VISUAL-FIX]`) |
 | 17 | **Intento RECHAZADO de rangos estructurales + bias** | Reimplementación estructural del anclaje + bias D1/H4 como filtro operativo. No cumplió la especificación → usuario rechazó todos los cambios (rechazo limpio). Spec preservada para reintento con micro-prompts |
+| 18 | **Auditoría completa de parámetros UI → backend** (15 jun) | Generado `PLAN_MEJORAS.md` con rastreo `LeftSidebar.tsx` → store → `mock-feed.ts` → handler bridge → consumidor para los 36 controles. Origen del hallazgo del mapeo camelCase roto |
+| 19 | **Fix mapeo camelCase de los 5 flags CRT** (15 jun) | [mt5_bridge.py:1742-1746](mt5_bridge.py): claves snake_case → camelCase para `requireCandleConfirmation`, `useDynamicSl`, `useCrtTargets`, `partialCloseAtEq`, `smtDivergenceEnabled`. Activa toda la metodología CRT institucional |
+| 20 | **Fix `global _eq_done, _crt_eq_target` en `positions_broadcaster`** (15 jun) | [mt5_bridge.py:1169-1170](mt5_bridge.py): añadidas a la declaración `global` existente. Resuelve `cannot access local variable '_eq_done'` provocado por el augmented assignment `_eq_done &= open_tickets` |
+| 21 | **Fix import faltante `calculate_dynamic_sl` / `calculate_crt_targets`** (15 jun) | [mt5_bridge.py:34](mt5_bridge.py): añadidas al `from crt_logic import …`. Resuelve `NameError` al activar `useDynamicSl` o `useCrtTargets` |
+| 22 | **Refactor UI**: selector de estrategia → texto fijo (15 jun) | [LeftSidebar.tsx:386-389](src/components/layout/LeftSidebar.tsx): eliminadas las 4 opciones decorativas, reemplazadas por `<span>CRT Institucional</span>`. Variables `strategy`/`setStrategy` y campo del store conservados. `npm run build` ✓ |
+| 23 | **Auditoría LIVE vs BACKTEST + tools de replay** (16 jun) | Creados `BACKTEST_AUDIT.md` (comparativa fase a fase, identifica el uso de `close` como bid/ask en backtest, ausencia de cooldown, máx 1 posición) y `replay_missed.py` (reconstrucción de condiciones del scanner). Mejorada telemetría de `diagnostic_crt.py` |
+| 24 | **Rename del directorio raíz** (16 jun) | `tradingview-gratis-master` → `Bot-Trading`. Verificado que ningún archivo de código depende de la ruta vieja (solo `ANALISIS_ARCHIVOS.md` la mencionaba). El repo de GitHub se renombra en el mismo commit |
 
 ---
 
@@ -1682,16 +1781,19 @@ Diferencia con `diagnostic_crt.py`: mientras `diagnostic_crt.py` muestra el esta
 ### Prioridad Alta
 - **P1 — Reintentar rangos estructurales + bias direccional con micro-prompts aislados:** Reimplementar la especificación de "rangos estructurales con bias" (ver sección "Intento Fallido") dividida en micro-prompts pequeños y verificables uno a uno. Lección clave: el prompt monolítico falló y fue rechazado por completo.
 - **P1b — ✅ Fix ChromaDB discriminación símbolo/dirección (COMPLETADO 11 jun tarde):** Resuelto con colecciones por símbolo + filtro `where` por símbolo y dirección. Tanto la discriminación direccional como la de símbolo están implementadas.
-- **P2 — Verificar pipeline completo con flags CRT activos:** Probar end-to-end con `require_candle_confirmation`, `use_dynamic_sl`, `use_crt_targets`, `smt_divergence_enabled` y `partial_close_at_eq` encendidos (usar `verify_crt_behavior.py` / `diagnostic_crt.py`).
-- **P2b — Handlers `risk_guard_alert` / `anchor_update` y filtro de manuales:** Cablear los handlers faltantes en `mock-feed.ts` y hacer que el bloqueo del scanner filtre posiciones por comment `CRT`.
+- **P2 — ✅ Activación real de la metodología CRT institucional (COMPLETADO 15 jun):** Resueltos los 3 bugs encadenados (mapeo camelCase + `global _eq_done` + import faltante). Los flags TBS/TWS, SL dinámico, targets CRT, cierre parcial en EQ y SMT ya pueden activarse desde la UI sin romper el scanner. Falta validación end-to-end en cuenta DEMO (con `audit_crt.py` + `diagnostic_crt.py`) antes de operar LIVE.
+- **P2b — Handlers `risk_guard_alert` y filtro de manuales:** `anchor_update`/`daily_range` ya cableados (15 jun). Falta `risk_guard_alert` y que el bloqueo del scanner filtre posiciones por comment `CRT`.
+- **P2c — Realismo del backtester:** Según `BACKTEST_AUDIT.md`, el motor actual usa `close` como bid Y ask (perdiendo spread), opera vela-a-vela (sin granularidad de tick), no aplica cooldown de 180 s y solo abre 1 posición máxima. Las métricas (Win Rate, Profit Factor) son optimistas respecto al comportamiento LIVE real.
 
 ### Prioridad Media
-- **P3 — Conectar selector de estrategia a `STRATEGY_REGISTRY`:** Migrar `strategy_scanner_task()` a `IStrategy` / `CRTStrategy`.
-- **P4 — Trailing stop, confluencia M1/M15, UI del optimizador:** Implementar las features decorativas restantes.
+- **P3 — Conectar `STRATEGY_REGISTRY` al scanner:** Migrar `strategy_scanner_task()` a `IStrategy` / `CRTStrategy`. El selector de UI ya fue eliminado el 15 jun, pero el campo `strategy` sobrevive en el store y el dataclass; tiene sentido conectarlo o eliminarlo por completo.
+- **P4 — Trailing stop, confluencia M1/M15, UI del optimizador:** Implementar las features decorativas restantes (o quitarlas, según decisión en `PLAN_MEJORAS.md` §5).
+- **P4b — Unificación de doble cierre parcial y eliminación de `smtDivergenceCheck` redundante:** Limpieza estructural pendiente de la auditoría de parámetros.
 - **Panel de evaluación CRT en tiempo real:** Semáforo por fase del scanner.
 
 ### Prioridad Baja
-8. **Walk-forward analysis:** Validación de robustez con ventanas in-sample/out-sample.
-9. **Multi-símbolo en backtest:** Ejecución paralela sobre varios pares.
-10. **Alertas sonoras:** Notificaciones de audio para trades y Risk Guard.
-11. **Slippage y comisiones:** Simulación realista de costos de trading en el backtester.
+- **Walk-forward analysis:** Validación de robustez con ventanas in-sample/out-sample.
+- **Multi-símbolo en backtest:** Ejecución paralela sobre varios pares.
+- **Alertas sonoras:** Notificaciones de audio para trades y Risk Guard.
+- **Slippage y comisiones:** Simulación realista de costos de trading en el backtester (parte de P2c).
+- **Inspiración upstream — EA de Neo Malesa (`crt-turtlesoup-ea`):** EA en MQL5 alert-only de la misma familia conceptual. Ideas aplicables como filtros puros en `crt_logic.py`: regla del 50% (mecha de barrido no debe cruzar el EQ), ratio Range Candle ≥ 2× Turtle Soup Candle, confirmación al cierre como default. La idea de **confluencia Premium/Discount HTF→LTF** es candidata natural para resucitar el flag `hybrid_m1_m15_confluence`.
