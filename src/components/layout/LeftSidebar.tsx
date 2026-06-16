@@ -383,21 +383,9 @@ export function LeftSidebar() {
             <span>Gestión de Estrategia</span>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-tv-text-muted">Estrategia Activa</label>
-              <InfoBubble text="Selecciona el estilo de trading y temporalidad objetivo para el bot." />
-            </div>
-            <select
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value as Strategy)}
-              className="w-full bg-tv-bg border border-zinc-800 rounded-md px-3 py-2 text-xs font-medium outline-none text-tv-text cursor-pointer hover:bg-zinc-900"
-            >
-              <option value="scalping">Scalping (Veloz / Alta Frecuencia)</option>
-              <option value="swing">Swing (Medio Plazo / H4)</option>
-              <option value="breakout">Breakout (Rupturas / Canales)</option>
-              <option value="reversal">Reversal (H4 Sweep / Liquidez)</option>
-            </select>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-zinc-400">Estrategia Activa</span>
+            <span className="text-sm font-medium text-zinc-100">CRT Institucional</span>
           </div>
 
           <div className="flex justify-between items-center bg-tv-bg border border-zinc-800 rounded-md px-3 py-1.5">
