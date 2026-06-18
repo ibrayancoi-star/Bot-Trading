@@ -1359,7 +1359,7 @@ export function PriceChart({ symbol, timeframe }: Props) {
             <span className="text-tv-text-muted">·</span>
             <span className="uppercase text-tv-text-muted">{timeframe}</span>
             <span className="text-tv-text-muted">·</span>
-            <span className="text-tv-text-muted">Mock · cTrader</span>
+            <span className="text-tv-text-muted">MT5 · CRT</span>
           </div>
           {hover && (
             <div className="flex items-center gap-x-3 text-[11px]">

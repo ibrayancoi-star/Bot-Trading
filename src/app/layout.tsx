@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { StrategyInitializer } from "@/components/dashboard/StrategyInitializer";
 import { TradeNotifications } from "@/components/dashboard/TradeNotifications";
 import "./globals.css";
 
@@ -18,9 +17,9 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "TradingView Gratis — Crypto charts open source",
+  title: "Bot Trading — Dashboard CRT Institucional",
   description:
-    "Plataforma de charts crypto en vivo. Alternativa gratis a TradingView. Powered by Binance + lightweight-charts.",
+    "Plataforma de trading con ejecución autónoma CRT. Powered by MetaTrader 5 + lightweight-charts.",
 };
 
 export default function RootLayout({
@@ -34,7 +33,6 @@ export default function RootLayout({
       className={`dark ${inter.variable} ${jetbrains.variable} h-full antialiased`}
     >
       <body className="h-full overflow-hidden bg-tv-bg text-tv-text">
-        <StrategyInitializer />
         <TooltipProvider delay={150}>{children}</TooltipProvider>
         <TradeNotifications />
       </body>
