@@ -167,6 +167,7 @@ export interface DailyRange {
   open: number;
   close: number;
   time: number;
+  bias?: "BUY" | "SELL" | "NEUTRO";
 }
 
 export interface AnchorRanges {
@@ -175,6 +176,7 @@ export interface AnchorRanges {
   low: number;
   eq: number;
   anchor_time: string;
+  bias?: "BUY" | "SELL" | "NEUTRO";
 }
 
 // [HISTORY-FIX-2] Métricas agregadas del historial

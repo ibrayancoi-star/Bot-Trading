@@ -1,11 +1,90 @@
 # Documentación Técnica — Dashboard de Trading Híbrido CRT
 
-> **Última actualización:** 2026-06-16 · **Versión del documento:** v4.0
+> **Última actualización:** 2026-06-18 · **Versión del documento:** v5.0
 > **Directorio del proyecto:** `Bot-Trading` (renombrado desde `tradingview-gratis-master`)
 >
 > Leyenda de estado: ✅ IMPLEMENTADO · 🔶 PARCIAL · ❌ PENDIENTE
 >
 > *Todas las marcas ✅/🔶/❌ de este documento se verificaron leyendo el código fuente real (junio 2026).*
+
+---
+
+## 🆕 Sesión 2026-06-17/18 — Reescritura del anclaje H4 estructural, tolerancia, rango agotado, bias D1 y limpieza de UI
+
+Esta sesión reemplazó completamente la selección de la vela de anclaje H4 (que era por calendario/zona horaria) por una **selección estructural** basada en la última vela cerrada no invalidada, portando fielmente la lógica de los scripts de verificación (`verify_range_logic.py` / `check_ranges.py`). Se añadieron las reglas de **tolerancia por par** y **rango agotado** que faltaban en el bot de producción. Además, se implementó el **bias direccional D1** con panel visual en el gráfico y se eliminaron elementos de UI no deseados.
+
+### Resumen ejecutivo de la sesión
+
+| # | Cambio | Archivo | Impacto |
+|---|--------|---------|---------|
+| 1 | **Reescritura completa de `update_reference_ranges()`** — selección estructural H4 | [mt5_bridge.py:566-645](mt5_bridge.py) | El anclaje H4 ya no depende de calendario/timezone. Escanea 60 velas cerradas de más reciente a más antigua, la primera cuyo rango no fue roto = rango activo. La vela en formación evalúa pero no es candidata |
+| 2 | **`_h4_range_broken()` — port fiel de `is_broken()`** | [mt5_bridge.py:511-543](mt5_bridge.py) | Dos reglas de invalidación: (1) cierre fuera de tolerancia, (2) rango agotado (ambos extremos tomados por mechas). Portado exactamente de `verify_range_logic.py` |
+| 3 | **Tolerancia de ruptura por par** | [mt5_bridge.py:167](mt5_bridge.py) | `_H4_TOLERANCE_PIPS = {"EURUSD": 2.5, "GBPUSD": 3.0}`. Un cierre solo invalida si supera `high + tol` o `low - tol`. Las mechas no invalidan |
+| 4 | **`_compute_range_bias()` — bias direccional genérico** | [mt5_bridge.py:546-563](mt5_bridge.py) | High tomado → SELL, low tomado → BUY. Gana el último extremo; precio actual tiene la última palabra |
+| 5 | **Bias D1 en `emit_daily_range()`** | [mt5_bridge.py:717-737](mt5_bridge.py) | El bias se calcula sobre el rango D1 (no H4), incluyendo la vela D1 en formación para detectar barridos aunque el precio ya haya vuelto dentro del rango |
+| 6 | **Panel visual Bias D1** en el gráfico | [PriceChart.tsx:1497](src/components/chart/PriceChart.tsx) | Etiqueta en esquina inferior izquierda: `▲ BUY` (verde) / `▼ SELL` (rojo) / `● NEUTRO` (gris), con fecha de la vela D1 de referencia |
+| 7 | **Eliminación del logo TradingView** | [PriceChart.tsx:243](src/components/chart/PriceChart.tsx) | `attributionLogo: false` en la configuración del chart |
+| 8 | **Eliminación del panel de osciladores (RSI/MACD)** | [PriceChart.tsx](src/components/chart/PriceChart.tsx) | Removido el estado `liveIndicators`, sus dos `setLiveIndicators` y todo el JSX del panel inferior derecho |
+| 9 | **Interfaces actualizadas** | [trading-store.ts](src/lib/store/trading-store.ts) | `AnchorRanges` y `DailyRange` ahora incluyen campo `bias?: "BUY" \| "SELL" \| "NEUTRO"` |
+
+### Cambio de paradigma: de calendario a estructura
+
+**Antes (calendario):** El bot usaba la hora actual en zona `Atlantic/Canary` para determinar qué vela H4 específica usar como anclaje (tabla de franjas horarias → hora de apertura objetivo). Este enfoque era frágil ante offsets de bróker incorrectos y no reflejaba la metodología CRT real.
+
+**Ahora (estructural):** Se descargan 60 velas H4 (`start_pos=0`), se separa la última como "en formación" y las demás como "cerradas". Se recorren las cerradas **de más reciente a más antigua**. Para cada candidata se evalúa `_h4_range_broken()` contra todas las velas posteriores (cerradas + en formación). La primera candidata no rota = rango activo.
+
+```
+update_reference_ranges():
+  rates_h4 = copy_rates_from_pos(symbol, H4, 0, 60)
+  forming = rates_h4[-1]         ← en formación: evalúa, NO es candidata
+  closed  = rates_h4[:-1]        ← cerradas: son candidatas
+
+  for i in range(len(closed)-1, -1, -1):   ← nuevo → viejo
+      cand = closed[i]
+      later = closed[i+1:] + [forming]
+      if not _h4_range_broken(cand.high, cand.low, later, tol):
+          reference = cand       ← primera no rota = seleccionada
+          break
+```
+
+### Reglas de invalidación (`_h4_range_broken`)
+
+**Regla 1 — Ruptura por cierre fuera de tolerancia:**
+Un rango se invalida si alguna vela posterior cierra por encima de `high + tolerancia` o por debajo de `low - tolerancia`. Las mechas que superan el rango **no invalidan** — solo el precio de cierre cuenta.
+
+| Par | Tolerancia |
+|-----|-----------|
+| EURUSD | 2.5 pips (0.00025) |
+| GBPUSD | 3.0 pips (0.00030) |
+
+**Regla 2 — Rango agotado (ambos extremos tomados):**
+Un rango se invalida si las velas posteriores (usando mechas, no cierres) tomaron **ambos** extremos del rango. Esto puede ocurrir de tres formas:
+- Una sola vela toma high Y low simultáneamente
+- Una vela toma el low → otra posterior toma el high
+- Una vela toma el high → otra posterior toma el low
+
+### Bias direccional D1
+
+El bias indica la dirección esperada del próximo movimiento basándose en qué extremo del rango D1 fue tomado:
+
+```
+_compute_range_bias(ref_high, ref_low, after, current_bid):
+  Para cada vela posterior (incluyendo la D1 en formación):
+    high tomado (wick >= ref_high) → bias = "SELL"
+    low tomado  (wick <= ref_low)  → bias = "BUY"
+  Precio actual >= ref_high → "SELL"
+  Precio actual <= ref_low  → "BUY"
+  Gana el último extremo tomado.
+  Si ninguno fue tomado → "NEUTRO"
+```
+
+**Decisión clave:** el bias se calcula sobre el rango **D1** (no H4), e incluye la vela D1 **en formación** (`copy_rates_from_pos(D1, 0, 1)`) en el conjunto evaluado. Esto permite detectar que la vela del día actual ya barrió un extremo, incluso si el precio ya volvió dentro del rango.
+
+### Correcciones de UI aplicadas
+
+1. **Panel Bias D1** posicionado en `bottom-9` (por encima de la escala de tiempo) para evitar solapamiento con las etiquetas de hora/fecha del gráfico.
+2. **Logo de TradingView** eliminado con `attributionLogo: false` en el `layout` del `createChart`, liberando la esquina inferior izquierda para el panel de bias.
+3. **Panel de osciladores (RSI/MACD)** eliminado completamente de la esquina inferior derecha. Los valores RSI/MACD siguen disponibles en las pills de indicadores de la parte superior.
 
 ---
 
@@ -353,27 +432,36 @@ Ejecutar la estrategia CRT de forma autónoma sobre una cuenta real (o demo) de 
 
 El bot ejecuta las 6 fases secuenciales a 1Hz mediante `strategy_scanner_task`:
 
-##### FASE 1 — Selección de la Vela de Anclaje H4
+##### FASE 1 — Selección de la Vela de Anclaje H4 ✅ (REESCRITA 17 jun — Selección Estructural)
 
-**Código:** `update_reference_ranges()` en `mt5_bridge.py`
+**Código:** `update_reference_ranges()` en [mt5_bridge.py:566-645](mt5_bridge.py)
 
-El bot selecciona una vela H4 **cerrada y específica** según calendario basado en hora Canaria (`Atlantic/Canary`):
-
-| Hora actual (Canary) | Vela H4 que busca (inicio) | Etiqueta |
-|---------------------|--------------------------|---------| 
-| 00:00 – 05:59 | 10:00 del **día anterior** | `14:00 Anchor` |
-| 06:00 – 09:59 | 02:00 del mismo día | `06:00 Anchor` |
-| 10:00 – 13:59 | 06:00 del mismo día | `10:00 Anchor` |
-| 14:00 – 23:59 | 10:00 del mismo día | `14:00 Anchor` |
+El bot selecciona la **última vela H4 cerrada cuyo rango no fue invalidado**, aplicando tolerancia por par y la regla de rango agotado. Este enfoque reemplaza la selección por calendario/timezone que era frágil ante offsets de bróker.
 
 **Proceso interno:**
-1. Descarga las últimas 10 velas H4 de MT5
-2. Calcula el offset de hora del servidor del bróker respecto a UTC
-3. Convierte la hora de apertura de cada vela a hora Canaria
-4. Busca la que coincida con el inicio objetivo
-5. **Fallback:** si no hay coincidencia exacta → usa `rates[1]` (la H4 cerrada más reciente)
+1. Descarga las últimas 60 velas H4 de MT5 (`start_pos=0` para incluir la en formación)
+2. Separa la última como "en formación" (evalúa pero NO es candidata)
+3. Escanea las cerradas de **más reciente a más antigua**
+4. Para cada candidata, evalúa `_h4_range_broken()` contra todas las velas posteriores (cerradas + en formación)
+5. La primera candidata **no rota** = rango activo seleccionado
+6. **Fallback:** si ninguna válida → usa la última cerrada
 
-> ⚠️ Si el bróker reporta timestamps incorrectos el offset se calcularía mal y la vela de anclaje sería errónea.
+**Reglas de invalidación (`_h4_range_broken`, [mt5_bridge.py:511-543](mt5_bridge.py)):**
+
+| Regla | Qué evalúa | Detalle |
+|-------|-----------|---------|
+| **Ruptura por cierre** | `close > high + tol` ó `close < low - tol` | Solo el precio de cierre invalida; las mechas no. Tolerancia: EURUSD 2.5 pips, GBPUSD 3.0 pips |
+| **Rango agotado** | Ambos extremos tomados por mechas | Una vela toma ambos, o una toma high + otra posterior toma low (o viceversa) |
+
+**Ejemplo de selección:**
+```
+Vela H4 18/06 08:00 → ❌ Cierre rompió high+tol (close = 1.04320 > 1.04295)
+Vela H4 17/06 20:00 → ✅ VÁLIDA (ninguna posterior rompió por cierre ni agotó el rango)
+                     → SELECCIONADA como rango activo
+Vela H4 17/06 16:00 → (no evaluada, ya se encontró la referencia)
+```
+
+> **Nota:** La lógica fue portada fielmente de los scripts de referencia `verify_range_logic.py` y `check_ranges.py`.
 
 ---
 
@@ -423,7 +511,7 @@ CRT_L ══════════════════ ← Mínimo de la v
 | Tick y symbol_info válidos | L618-621 |
 | Rangos de anclaje inicializados | L629-630 |
 
-> ⚠️ **Observación crítica:** El bot detecta el barrido con **un solo tick** que supere el nivel. No espera cierre de vela ni confirmación de mecha. Los modelos TBS/TWS están documentados en las reglas pero **no están implementados** en el scanner.
+> **Modos de operación:** Por defecto, el bot detecta el barrido con un solo tick. Si se activa `requireCandleConfirmation`, el sweep pasa al buffer `_sweep_pending` y espera confirmación TBS/TWS por la vela M1 siguiente (ver sección CRT Real). El modo de 1 tick sigue disponible como fallback rápido.
 
 ---
 
@@ -618,10 +706,10 @@ El modo LIVE es plenamente operativo. El bot ejecuta órdenes reales en MT5 cuan
 | Funcionalidad | Estado | Detalle |
 |---------------|--------|---------|
 | Trailing Stop dinámico | ❌ No implementado | `BotConfig.trailing_stop` se guarda pero no se usa. Debería mover SL a breakeven y luego seguir precio |
-| Cierre parcial en Equilibrium | ❌ No implementado | `BotConfig.partial_close` se guarda pero no se usa. Debería cerrar X% del volumen cuando precio toque EQ |
-| Confirmación TBS/TWS | ❌ No implementado | El sweep actual es de 1 tick. Falta confirmar cierre fuera/dentro del rango (TBS) y validar mecha ≥50% (TWS) |
+| Cierre parcial en Equilibrium | ✅ Implementado (15 jun) | `positions_broadcaster` cierra `partial_close_pct`% al tocar EQ + mueve SL a breakeven. Activar con `partialCloseAtEq` |
+| Confirmación TBS/TWS | ✅ Implementado (15 jun) | `classify_sweep_type()` + buffer `_sweep_pending` con timeout 180s. Activar con `requireCandleConfirmation` |
 | Confluencia M1/M15 | ❌ No implementado | `hybrid_m1_m15_confluence` se guarda pero no evalúa divergencias entre temporalidades |
-| SMT Divergence Check | ❌ No implementado | `smt_divergence_check` se guarda pero no compara pares correlacionados (ej: EURUSD vs DXY) |
+| SMT Divergence | ✅ Implementado (15 jun) | `check_smt_divergence()` compara EURUSD↔GBPUSD. Activar con `smtDivergenceEnabled` |
 | Max posiciones real | ❌ No implementado | `max_positions = 3` existe pero el scanner solo comprueba `> 0` |
 | Panel de evaluación en tiempo real | ❌ No implementado | Dashboard visual que muestre las 6 fases del scanner con semáforo live |
 | Log de señales rechazadas | ❌ Parcial | Las señales `DISMISSED` se emiten como `signal_evaluation` pero no se persisten ni se visualizan en tabla dedicada |
@@ -906,19 +994,53 @@ Se recrean al cambiar `dailyRange` o `symbol`.
 - Máximo **5** FVGs más recientes (`.slice(-5)`).
 - Cada FVG = par de `priceLines` (top + bottom): **verde** (`rgba(34,197,94,0.4)`) si alcista, **rojo** (`rgba(239,68,68,0.4)`) si bajista. Títulos `FVG ▲` / `FVG ▼`.
 
+### Capa 5 — Panel de Bias D1 (esquina inferior izquierda) ✅ (añadido 18 jun)
+
+`PriceChart.tsx` L1497. Lee `dailyRange.bias` del store. Muestra:
+- **▲ BUY** (verde `text-emerald-400`) cuando el low del rango D1 fue tomado
+- **▼ SELL** (rojo `text-rose-400`) cuando el high del rango D1 fue tomado
+- **● NEUTRO** (gris `text-tv-text-muted`) cuando ningún extremo fue tomado
+
+Incluye la fecha de la vela D1 de referencia en formato `dd/mm`. Posicionado en `bottom-9 left-3` para no solapar con la escala de tiempo.
+
+### Eliminación del logo TradingView ✅ (18 jun)
+
+`PriceChart.tsx` L243: `attributionLogo: false` en la configuración `layout` del `createChart`. El logo ya no aparece en la esquina inferior izquierda.
+
+### Eliminación del panel de osciladores RSI/MACD ✅ (18 jun)
+
+Removido completamente el estado `liveIndicators` (useState), las dos asignaciones `setLiveIndicators(...)` en los handlers WebSocket, y todo el JSX del panel inferior derecho que mostraba los valores numéricos de RSI y MACD. Los indicadores siguen disponibles como líneas superpuestas en el gráfico y en las pills de la esquina superior.
+
 ### Bug resuelto: `series.setMarkers` no existe en esta versión de Lightweight Charts ✅
 
 El primer intento de FVG usaba `series.setMarkers()`, método **inexistente** en la API de esta versión (error en runtime). Se reemplazó por `series.createPriceLine()` (comentado `[CHART-VISUAL-FIX]`, L183, L1128), compatible con todas las versiones y coherente con el resto de decoraciones.
 
 ### Lógica de la vela D1 de referencia (backend `emit_daily_range`) ✅
 
-`mt5_bridge.py` L596-676. Selecciona la **última vela D1 CERRADA** que cumple **dos** condiciones simultáneas:
+`mt5_bridge.py` L650-744. Selecciona la **última vela D1 CERRADA** que cumple **dos** condiciones simultáneas:
 1. **Contención:** el precio actual (`current_bid`) está dentro del rango de mecha (`wick_low ≤ bid ≤ wick_high`).
 2. **No rota por cuerpo:** ninguna vela cerrada posterior superó su high/low con el **cuerpo** (`max/min(open, close)`), no con la mecha.
 
-La vela **en formación nunca participa** (ni como candidata ni como evaluadora — `copy_rates_from_pos(..., start_pos=1)`). Logs `[D1-RANGE]` detallan cada evaluación (⏭️ fuera de rango / ❌ rota por cuerpo / ✅ válida / fallback). Emitido como mensaje `daily_range` (broadcast o al cliente que conecta).
+La vela **en formación no es candidata** (las cerradas se obtienen con `start_pos=1`), pero **sí participa en el cálculo de bias** (se obtiene por separado con `copy_rates_from_pos(D1, 0, 1)`). Logs `[D1-RANGE]` detallan cada evaluación (⏭️ fuera de rango / ❌ rota por cuerpo / ✅ válida / fallback). Emitido como mensaje `daily_range` (broadcast o al cliente que conecta).
 
-> **ACLARACIÓN OPERATIVA:** el rango D1 es **SOLO VISUAL** (referencia para el operador). El bot **opera únicamente con el rango H4 de anclaje por calendario** (Fase 1 del scanner). El rango D1 no entra en ninguna decisión de ejecución.
+### Bias D1 (añadido 17 jun) ✅
+
+El bias direccional se calcula sobre el rango D1 de referencia y se difunde en el campo `bias` del mensaje `daily_range`:
+
+```python
+# Se incluyen las velas D1 cerradas posteriores al rango + la vela D1 en formación
+forming_d1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_D1, 0, 1)
+after_d1 = [cerradas_posteriores] + [forming_d1]
+bias_d1 = _compute_range_bias(ref_high_d1, ref_low_d1, after_d1, current_bid)
+```
+
+| Condición | Bias | Significado |
+|-----------|------|------------|
+| Low del rango D1 tomado (por mecha o precio) | **BUY** | Se espera reversión alcista de vuelta al rango |
+| High del rango D1 tomado | **SELL** | Se espera reversión bajista |
+| Ningún extremo tomado | **NEUTRO** | Sin dirección definida |
+
+> **ACLARACIÓN OPERATIVA:** el rango D1 y su bias son **referencia visual e informativa** para el operador (panel en el gráfico). El bot **opera con el rango H4 estructural** (Fase 1 del scanner). El bias D1 no filtra ni bloquea ejecuciones del scanner.
 
 ---
 
@@ -1159,6 +1281,14 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 | **`positions_broadcaster` crashea con `_eq_done` local** | ✅ RESUELTO (15 jun) | Añadido `global _eq_done, _crt_eq_target` ([mt5_bridge.py:1169-1170](mt5_bridge.py)). El cierre parcial en EQ y el broadcast de posiciones ya no rompen al activar `partialCloseAtEq`. |
 | **`NameError` por import faltante de `calculate_dynamic_sl` / `calculate_crt_targets`** | ✅ RESUELTO (15 jun) | Añadidas al import desde `crt_logic` ([mt5_bridge.py:34](mt5_bridge.py)). Activar `useDynamicSl` o `useCrtTargets` ya no rompe el scanner. |
 | **Selector de estrategia decorativo en la UI** | ✅ RESUELTO (15 jun) | Reemplazado por texto fijo "CRT Institucional" en [LeftSidebar.tsx:386-389](src/components/layout/LeftSidebar.tsx). El campo `strategy` del store y del payload se conserva con el default `"scalping"` (sin efecto real porque el scanner sigue ejecutando CRT inline). |
+| **Anclaje H4 por calendario/timezone** | ✅ RESUELTO (17 jun) | Reemplazado completamente por selección estructural (última vela cerrada no rota, con tolerancia + rango agotado). Ya no depende de hora Canaria ni offset de bróker. Ver sesión 17-18 jun. |
+| **Tolerancia de ruptura ausente en producción** | ✅ RESUELTO (17 jun) | `_H4_TOLERANCE_PIPS = {"EURUSD": 2.5, "GBPUSD": 3.0}` aplicado en `_h4_range_broken()`. Solo existía en scripts de verificación, ahora también en el bot. |
+| **Regla de rango agotado ausente en producción** | ✅ RESUELTO (17 jun) | `_h4_range_broken()` evalúa si ambos extremos del rango fueron tomados por mechas. Solo existía en scripts de verificación. |
+| **Bias calculado sobre H4 en vez de D1** | ✅ RESUELTO (18 jun) | Movido de `update_reference_ranges()` (H4) a `emit_daily_range()` (D1). Incluye la vela D1 en formación. |
+| **Bias mostraba NEUTRO incorrectamente** | ✅ RESUELTO (18 jun) | `emit_daily_range()` obtenía solo velas cerradas (`start_pos=1`). Ahora obtiene por separado la vela D1 en formación y la incluye en el cálculo. |
+| **Panel de bias solapado con escala de tiempo** | ✅ RESUELTO (18 jun) | Subido de `bottom-3` a `bottom-9`. |
+| **Logo TradingView solapado con panel bias** | ✅ RESUELTO (18 jun) | `attributionLogo: false` en layout del chart. |
+| **Panel RSI/MACD no deseado** | ✅ RESUELTO (18 jun) | Eliminado completamente (estado, setters, JSX). |
 | **Docstring obsoleto en `is_in_active_killzone()`** | 🔶 Cosmético | El docstring dice "hora UTC actual" (L592) pero el código ya usa `_to_canary()` (L594). El comportamiento es correcto (Canary); solo el comentario quedó desactualizado. |
 | **`maxPositions` / bloqueo del scanner cuentan posiciones manuales** | 🔶 Pendiente | Ver tabla de Gaps: el límite y el salto de símbolo no filtran por comment `CRT`, así que operaciones manuales afectan al bot. |
 | **Handlers `risk_guard_alert` / `anchor_update` sin frontend** | 🔶 Parcial | `anchor_update` y `daily_range` ya tienen handler en [mock-feed.ts:612-614](src/lib/data/mock-feed.ts). `risk_guard_alert` sigue sin handler dedicado — el backend lo emite pero la UI no lo distingue de otros mensajes. |
@@ -1170,27 +1300,25 @@ En las últimas iteraciones se ha mejorado sustancialmente el manejo de la infor
 
 ---
 
-## ❌ Intento Fallido: Rangos Estructurales con Bias (11 junio 2026) — ❌ PENDIENTE
+## ✅ Rangos Estructurales con Bias — IMPLEMENTADO (18 junio 2026)
 
-> Lección aprendida documentada para un reintento futuro. **Ninguno de estos cambios está en el código** — el usuario los rechazó en su totalidad. Verificado: `crt_logic.py` **no contiene** `is_range_broken`, `find_structural_range`, `compute_range_bias` ni `effective_bias`; `mt5_bridge.py` **no contiene** `_structural_ranges` ni `update_structural_ranges`. El scanner sigue anclando por **calendario H4** sin cambios.
+> **Historial:** El primer intento (11 jun) fue rechazado por completo porque el agente no cumplió la especificación del usuario. El reintento exitoso (17-18 jun) portó fielmente la lógica de `verify_range_logic.py` / `check_ranges.py` al bot de producción.
 
-### Objetivo (no alcanzado)
+### Lo que se implementó (sesión 17-18 jun)
 
-Reemplazar el anclaje H4 por calendario con una **selección estructural** del rango (última vela no rota por cuerpo, con tolerancia de mecha y retorno al rango) y añadir un **sistema de bias direccional D1/H4** como **filtro operativo del scanner** (no solo visual).
+| Especificación original | Estado | Implementación |
+|------------------------|--------|---------------|
+| Rango válido = última vela cerrada no rota | ✅ | `update_reference_ranges()` escanea de más reciente a más antigua. Primera no rota = seleccionada |
+| Invalidación por cierre con tolerancia 2.5p / 3.0p | ✅ | `_h4_range_broken()` + `_H4_TOLERANCE_PIPS`. Solo cierres invalidan, mechas no |
+| Rango agotado (ambos extremos tomados) | ✅ | `_h4_range_broken()` evalúa mechas para detectar que ambos extremos fueron alcanzados |
+| Vela en formación evalúa pero no es candidata | ✅ | `forming = rates_h4[-1]` incluida en `later`, excluida de candidatas |
+| Bias D1: max tomado → SELL, min tomado → BUY | ✅ | `_compute_range_bias()` sobre rango D1, incluyendo vela D1 en formación |
+| Bias como referencia visual | ✅ | Panel `Bias D1` en esquina inferior izquierda del gráfico |
 
-### Resultado
+### Lo que queda diferente respecto a la especificación original del 11 jun
 
-La implementación del agente **no cumplió la especificación** del usuario. El usuario **RECHAZÓ todos los cambios** (rechazo limpio, sin restos en el código). Lección: el prompt monolítico falló — se reintentará con **micro-prompts más pequeños y aislados**.
-
-### Especificación a preservar (para reintento futuro)
-
-Copiada tal cual de la solicitud original del usuario:
-
-- **Rango válido** = última vela cerrada cuyo max/min de **mecha** no fue superado **con cuerpo** por velas posteriores cerradas.
-- **Tolerancia:** exceso de cuerpo ≤ **2.5 pips (EURUSD)** / ≤ **3 pips (GBPUSD)** con retorno al rango → el rango sigue válido hasta llegar al extremo opuesto.
-- **Bias D1:** max tomado → el bias se mantiene hasta tomar el min (y viceversa).
-- **Bias H4 con confluencia D1:** se mantiene hasta completar la expansión al extremo opuesto del rango D1.
-- Las reglas deben ser **operativas** (filtro del scanner), **no solo visuales**.
+- **Bias como filtro operativo del scanner:** la especificación original pedía que el bias **bloqueara** señales contrarias. La implementación actual lo usa como **referencia visual** (panel en el gráfico), pero **no filtra** ejecuciones del scanner. Decisión deliberada del usuario durante la sesión del 17-18 jun.
+- **Bias H4 con confluencia D1:** no implementado. El bias solo se calcula sobre D1, no sobre la confluencia H4↔D1.
 
 ---
 
@@ -1223,6 +1351,14 @@ Copiada tal cual de la solicitud original del usuario:
 | 22 | **Refactor UI**: selector de estrategia → texto fijo (15 jun) | [LeftSidebar.tsx:386-389](src/components/layout/LeftSidebar.tsx): eliminadas las 4 opciones decorativas, reemplazadas por `<span>CRT Institucional</span>`. Variables `strategy`/`setStrategy` y campo del store conservados. `npm run build` ✓ |
 | 23 | **Auditoría LIVE vs BACKTEST + tools de replay** (16 jun) | Creados `BACKTEST_AUDIT.md` (comparativa fase a fase, identifica el uso de `close` como bid/ask en backtest, ausencia de cooldown, máx 1 posición) y `replay_missed.py` (reconstrucción de condiciones del scanner). Mejorada telemetría de `diagnostic_crt.py` |
 | 24 | **Rename del directorio raíz** (16 jun) | `tradingview-gratis-master` → `Bot-Trading`. Verificado que ningún archivo de código depende de la ruta vieja (solo `ANALISIS_ARCHIVOS.md` la mencionaba). El repo de GitHub se renombra en el mismo commit |
+| 25 | **Reescritura completa de `update_reference_ranges()`** (17 jun) | Reemplazado el anclaje H4 por calendario con selección estructural: última vela cerrada no rota (escaneo nuevo→viejo sobre 60 velas). Port fiel de `verify_range_logic.py` |
+| 26 | **`_h4_range_broken()` — invalidación con tolerancia + rango agotado** (17 jun) | Tolerancia: EURUSD 2.5p, GBPUSD 3.0p (solo cierres invalidan, mechas no). Rango agotado: ambos extremos tomados por mechas. `_H4_TOLERANCE_PIPS` como constante global |
+| 27 | **`_compute_range_bias()` — bias direccional genérico** (17 jun) | High tomado→SELL, low tomado→BUY, último extremo gana, precio actual tiene última palabra. Usado tanto por H4 como por D1 |
+| 28 | **Bias D1 en `emit_daily_range()`** (18 jun) | Bias calculado sobre rango D1 (no H4) incluyendo la vela D1 en formación. Corrige NEUTRO incorrecto que se mostraba cuando la vela del día ya había tomado un extremo |
+| 29 | **Panel visual Bias D1 en el gráfico** (18 jun) | Etiqueta `bottom-9 left-3` con ▲ BUY / ▼ SELL / ● NEUTRO + fecha de la vela D1 de referencia |
+| 30 | **Eliminación del logo TradingView** (18 jun) | `attributionLogo: false` en `createChart` layout options |
+| 31 | **Eliminación del panel de osciladores RSI/MACD** (18 jun) | Removido estado `liveIndicators`, setters `setLiveIndicators` y todo el JSX del panel inferior derecho. Los valores siguen en pills superiores |
+| 32 | **Interfaces `AnchorRanges` y `DailyRange` con campo `bias`** (17 jun) | `bias?: "BUY" \| "SELL" \| "NEUTRO"` añadido a ambas interfaces en `trading-store.ts` |
 
 ---
 
@@ -1779,9 +1915,9 @@ Diferencia con `diagnostic_crt.py`: mientras `diagnostic_crt.py` muestra el esta
 ---
 
 ### Prioridad Alta
-- **P1 — Reintentar rangos estructurales + bias direccional con micro-prompts aislados:** Reimplementar la especificación de "rangos estructurales con bias" (ver sección "Intento Fallido") dividida en micro-prompts pequeños y verificables uno a uno. Lección clave: el prompt monolítico falló y fue rechazado por completo.
-- **P1b — ✅ Fix ChromaDB discriminación símbolo/dirección (COMPLETADO 11 jun tarde):** Resuelto con colecciones por símbolo + filtro `where` por símbolo y dirección. Tanto la discriminación direccional como la de símbolo están implementadas.
-- **P2 — ✅ Activación real de la metodología CRT institucional (COMPLETADO 15 jun):** Resueltos los 3 bugs encadenados (mapeo camelCase + `global _eq_done` + import faltante). Los flags TBS/TWS, SL dinámico, targets CRT, cierre parcial en EQ y SMT ya pueden activarse desde la UI sin romper el scanner. Falta validación end-to-end en cuenta DEMO (con `audit_crt.py` + `diagnostic_crt.py`) antes de operar LIVE.
+- **P1 — ✅ Rangos estructurales + bias D1 (COMPLETADO 17-18 jun):** Reescritura completa del anclaje H4 (de calendario a estructural), tolerancia por par, rango agotado, bias D1 con vela en formación, panel visual. Port fiel de `verify_range_logic.py`.
+- **P1b — ✅ Fix ChromaDB discriminación símbolo/dirección (COMPLETADO 11 jun tarde):** Resuelto con colecciones por símbolo + filtro `where` por símbolo y dirección.
+- **P2 — ✅ Activación real de la metodología CRT institucional (COMPLETADO 15 jun):** Resueltos los 3 bugs encadenados (mapeo camelCase + `global _eq_done` + import faltante). Los flags TBS/TWS, SL dinámico, targets CRT, cierre parcial en EQ y SMT ya pueden activarse desde la UI.
 - **P2b — Handlers `risk_guard_alert` y filtro de manuales:** `anchor_update`/`daily_range` ya cableados (15 jun). Falta `risk_guard_alert` y que el bloqueo del scanner filtre posiciones por comment `CRT`.
 - **P2c — Realismo del backtester:** Según `BACKTEST_AUDIT.md`, el motor actual usa `close` como bid Y ask (perdiendo spread), opera vela-a-vela (sin granularidad de tick), no aplica cooldown de 180 s y solo abre 1 posición máxima. Las métricas (Win Rate, Profit Factor) son optimistas respecto al comportamiento LIVE real.
 

@@ -158,9 +158,13 @@ last_ticks = {
 
 # Rangos de referencia anclados para EURUSD y GBPUSD
 anchor_ranges = {
-    "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"},
-    "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4"}
+    "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4", "bias": "NEUTRO"},
+    "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4", "bias": "NEUTRO"}
 }
+
+# [RANGE-TOL] Tolerancia de ruptura por cierre, por par (en pips). Un cierre solo invalida
+# el rango si supera high+tol o low-tol. Fuente: verify_range_logic.py / check_ranges.py
+_H4_TOLERANCE_PIPS = {"EURUSD": 2.5, "GBPUSD": 3.0}
 
 # [CRT-IMPL-3] Buffer de confirmacion de sweep por cierre de vela
 _sweep_pending: dict = {}
@@ -504,91 +508,141 @@ def get_current_atr(broker_sym, timeframe, period=14):
         logger.error(f"Error al calcular ATR para {broker_sym}: {e}")
         return 12.0
 
+def _h4_range_broken(cand_high: float, cand_low: float, later, tol: float) -> bool:
+    """
+    Determina si una vela candidata fue invalidada por velas posteriores.
+    Reglas (port de verify_range_logic.py):
+    1. Ruptura por cierre FUERA de tolerancia: close > high+tol  ó  close < low-tol.
+    2. RANGO AGOTADO: una vela posterior toma ambos extremos, o se toma un extremo y
+       luego (en otra vela) el opuesto. Usa mechas (high/low) para "tomar" un extremo.
+    `later` incluye las cerradas siguientes Y la vela en formación.
+    """
+    low_taken = False
+    high_taken = False
+    for c in later:
+        close = float(c["close"])
+        if close > cand_high + tol:
+            return True
+        if close < cand_low - tol:
+            return True
+
+        took_low = float(c["low"]) <= cand_low
+        took_high = float(c["high"]) >= cand_high
+
+        if took_low and took_high:
+            return True
+        if low_taken and took_high:
+            return True
+        if high_taken and took_low:
+            return True
+
+        if took_low:
+            low_taken = True
+        if took_high:
+            high_taken = True
+    return False
+
+
+def _compute_range_bias(ref_high: float, ref_low: float, after, current_bid: float) -> str:
+    """
+    Bias direccional de un rango (port de verify_range_logic.py):
+    high tomado -> SELL (esperamos reversión bajista), low tomado -> BUY.
+    Gana el último extremo tomado; el precio actual tiene la última palabra.
+    `after` debe incluir las velas posteriores al rango Y la vela en formación.
+    """
+    bias = "NEUTRO"
+    for c in after:
+        if float(c["high"]) >= ref_high:
+            bias = "SELL"
+        if float(c["low"]) <= ref_low:
+            bias = "BUY"
+    if current_bid >= ref_high:
+        bias = "SELL"
+    if current_bid <= ref_low:
+        bias = "BUY"
+    return bias
+
+
 def update_reference_ranges():
     """
-    Monitorea y calcula los rangos de referencia (HTF Anchor Candles) basados en la hora de Canarias.
-    Busca la vela H4 que corresponde al último cierre de vela de anclaje (06:00, 10:00 o 14:00 Canary time).
+    Selecciona la vela H4 de anclaje (CRT range candle) = la última vela cerrada cuyo
+    rango NO fue roto, aplicando tolerancia por par y la regla de rango agotado.
+
+    Regla (port fiel de verify_range_logic.py / check_ranges.py):
+    1. La vela en formación NO es candidata, pero SÍ evalúa (puede romper/agotar).
+    2. Invalidación por cierre solo si supera high+tol / low-tol (tolerancia por par).
+    3. Invalidación por rango agotado: velas posteriores tomaron ambos extremos.
+    4. Se elige la MÁS RECIENTE cerrada no rota (escaneo nuevo->viejo).
+    Además calcula el BIAS direccional y lo difunde a la web.
     """
     global MT5_INITIALIZED, anchor_ranges
     if not MT5_INITIALIZED:
         return
 
     try:
-        tz = ZoneInfo("Atlantic/Canary")
-        now_canary = datetime.datetime.now(tz)
-        current_hour = now_canary.hour
-
-        # Determinar el inicio teórico de la vela de anclaje (Canary time)
-        if current_hour >= 14 or current_hour < 6:
-            target_start_hour = 10  # Vela de 10:00 a 14:00 Canary (cierra a las 14:00)
-            anchor_label = "14:00 Anchor (10:00-14:00)"
-        elif current_hour >= 10:
-            target_start_hour = 6   # Vela de 06:00 a 10:00 Canary (cierra a las 10:00)
-            anchor_label = "10:00 Anchor (06:00-10:00)"
-        else:
-            target_start_hour = 2   # Vela de 02:00 a 06:00 Canary (cierra a las 06:00)
-            anchor_label = "06:00 Anchor (02:00-06:00)"
-
         for symbol in ["EURUSD", "GBPUSD"]:
             broker_sym = get_broker_symbol(symbol)
-            rates = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_H4, 0, 10)
-            if rates is None or len(rates) == 0:
+
+            rates_h4 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_H4, 0, 60)
+            if rates_h4 is None or len(rates_h4) < 3:
                 continue
 
-            # Calcular la zona horaria del broker en base al tick actual
             tick = mt5.symbol_info_tick(broker_sym)
-            if tick:
-                server_dt = datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
-                local_dt = datetime.datetime.now(datetime.timezone.utc)
-                offset_hours = round((server_dt - local_dt).total_seconds() / 3600.0)
-            else:
-                offset_hours = 2
+            if tick is None:
+                continue
+            current_bid = tick.bid
 
-            selected_rate = None
-            for rate in reversed(rates):
-                broker_start_dt = datetime.datetime.fromtimestamp(rate['time'])
-                canary_start_dt = broker_start_dt - datetime.timedelta(hours=offset_hours)
-                
-                if canary_start_dt.hour == target_start_hour:
-                    # Si es overnight (h < 6), buscar la vela de ayer a las 10:00
-                    if current_hour < 6:
-                        yesterday_date = (now_canary - datetime.timedelta(days=1)).date()
-                        if canary_start_dt.date() == yesterday_date:
-                            selected_rate = rate
-                            break
-                    else:
-                        if canary_start_dt.date() == now_canary.date():
-                            selected_rate = rate
-                            break
+            pip_value = 0.01 if "JPY" in symbol.upper() else 0.0001
+            tol = _H4_TOLERANCE_PIPS.get(symbol, 2.5) * pip_value
 
-            # Si no se encontró coincidencia perfecta, usar la vela cerrada anterior (index 1)
-            if selected_rate is None and len(rates) > 1:
-                selected_rate = rates[1]
+            forming = rates_h4[-1]          # en formación: evalúa pero no es candidata
+            closed = rates_h4[:-1]          # solo cerradas son candidatas
 
-            if selected_rate is not None:
-                high = float(selected_rate['high'])
-                low = float(selected_rate['low'])
-                eq = low + 0.5 * (high - low)
-                
-                # Actualizar y notificar solo si cambió
-                if anchor_ranges[symbol]["high"] != high or anchor_ranges[symbol]["low"] != low:
-                    anchor_ranges[symbol].update({
-                        "high": high,
-                        "low": low,
-                        "eq": eq,
-                        "anchor_time": anchor_label
-                    })
-                    logger.info(f"Escáner: Rango de anclaje actualizado para {symbol}: High={high:.5f}, Low={low:.5f}, EQ={eq:.5f} ({anchor_label})")
-                    
-                    asyncio.create_task(broadcast({
-                        "type": "anchor_update",
-                        "symbol": symbol,
-                        "high": high,
-                        "low": low,
-                        "eq": eq,
-                        "anchor_time": anchor_label
-                    }))
-                    asyncio.create_task(emit_daily_range(None))  # broadcast a todos
+            reference = None
+            # Escanear de la MÁS RECIENTE cerrada hacia atrás: la primera no rota es el rango.
+            for i in range(len(closed) - 1, -1, -1):
+                cand = closed[i]
+                later = list(closed[i + 1:]) + [forming]
+                if not _h4_range_broken(float(cand["high"]), float(cand["low"]), later, tol):
+                    reference = cand
+                    break
+
+            # Fallback: ninguna válida -> usar la última cerrada
+            if reference is None:
+                reference = closed[-1]
+
+            high = float(reference["high"])
+            low = float(reference["low"])
+            eq = low + 0.5 * (high - low)
+            candle_dt = datetime.datetime.utcfromtimestamp(int(reference["time"]))
+            anchor_label = f"H4 {candle_dt.strftime('%d/%m %H:%M')} UTC"
+
+            # Bias: velas posteriores al rango (cerradas + en formación) y precio actual
+            ref_time = int(reference["time"])
+            after = [c for c in rates_h4 if int(c["time"]) > ref_time]
+            bias = _compute_range_bias(high, low, after, current_bid)
+
+            prev = anchor_ranges[symbol]
+            if prev["high"] != high or prev["low"] != low or prev.get("bias") != bias:
+                anchor_ranges[symbol].update({
+                    "high": high,
+                    "low": low,
+                    "eq": eq,
+                    "anchor_time": anchor_label,
+                    "bias": bias,
+                })
+                logger.info(f"[H4-ANCHOR] {symbol} | bid={current_bid:.5f} | ✅ {anchor_label} H={high:.5f} L={low:.5f} EQ={eq:.5f} BIAS={bias}")
+
+                asyncio.create_task(broadcast({
+                    "type": "anchor_update",
+                    "symbol": symbol,
+                    "high": high,
+                    "low": low,
+                    "eq": eq,
+                    "anchor_time": anchor_label,
+                    "bias": bias,
+                }))
+                asyncio.create_task(emit_daily_range(None))
     except Exception as e:
         logger.error(f"Error en update_reference_ranges: {e}")
 
@@ -660,6 +714,18 @@ async def emit_daily_range(target):
             fallback_date = datetime.fromtimestamp(int(reference["time"])).strftime("%d/%m")
             logger.info(f"[D1-RANGE] → FALLBACK: {fallback_date}")
 
+        # [BIAS-D1] Bias direccional sobre el rango D1. Incluye la vela D1 en formación
+        # para detectar el barrido aunque el precio ya haya vuelto dentro del rango.
+        ref_high_d1 = float(reference["high"])
+        ref_low_d1 = float(reference["low"])
+        ref_time_d1 = int(reference["time"])
+        after_d1 = [c for c in rates_d1 if int(c["time"]) > ref_time_d1]
+        forming_d1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_D1, 0, 1)
+        if forming_d1 is not None and len(forming_d1) > 0:
+            after_d1 = list(after_d1) + [forming_d1[0]]
+        bias_d1 = _compute_range_bias(ref_high_d1, ref_low_d1, after_d1, current_bid)
+        logger.info(f"[D1-RANGE] {symbol} → BIAS: {bias_d1}")
+
         msg = {
             "type": "daily_range",
             "symbol": symbol,
@@ -667,7 +733,8 @@ async def emit_daily_range(target):
             "low": round(float(reference["low"]), 5),
             "open": round(float(reference["open"]), 5),
             "close": round(float(reference["close"]), 5),
-            "time": int(reference["time"])
+            "time": int(reference["time"]),
+            "bias": bias_d1
         }
 
         if hasattr(target, 'send'):
@@ -1629,7 +1696,8 @@ async def handler(websocket):
                     "high": anchor_ranges[symbol]["high"],
                     "low": anchor_ranges[symbol]["low"],
                     "eq": anchor_ranges[symbol]["eq"],
-                    "anchor_time": anchor_ranges[symbol]["anchor_time"]
+                    "anchor_time": anchor_ranges[symbol]["anchor_time"],
+                    "bias": anchor_ranges[symbol].get("bias", "NEUTRO")
                 }))
         await emit_daily_range(websocket)
     except Exception as e:

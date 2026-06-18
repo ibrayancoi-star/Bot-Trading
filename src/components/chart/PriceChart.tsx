@@ -162,16 +162,6 @@ export function PriceChart({ symbol, timeframe }: Props) {
   const ema9Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const ema21Ref = useRef<ISeriesApi<"Line"> | null>(null);
 
-  const [liveIndicators, setLiveIndicators] = useState<{
-    ema_9?: number;
-    ema_21?: number;
-    rsi?: number;
-    macd?: {
-      macd: number;
-      signal: number;
-      histogram: number;
-    };
-  } | null>(null);
   const rsiRef = useRef<ISeriesApi<"Line"> | null>(null);
   const rsi30Ref = useRef<ISeriesApi<"Line"> | null>(null);
   const rsi70Ref = useRef<ISeriesApi<"Line"> | null>(null);
@@ -249,6 +239,8 @@ export function PriceChart({ symbol, timeframe }: Props) {
         textColor: TV_COLORS.text,
         fontFamily: "var(--font-sans), Inter, system-ui, sans-serif",
         fontSize: 11,
+        // [UI] Ocultar el logo de atribución de TradingView (esquina inferior izquierda)
+        attributionLogo: false,
         panes: { separatorColor: TV_COLORS.border, separatorHoverColor: TV_COLORS.border },
       },
       grid: {
@@ -1223,7 +1215,6 @@ export function PriceChart({ symbol, timeframe }: Props) {
           if (ema21Ref.current && k.indicators.ema_21 !== undefined) {
             ema21Ref.current.update({ time: k.time as UTCTimestamp, value: k.indicators.ema_21 });
           }
-          setLiveIndicators(k.indicators);
         }
         updateEMAs();
         updateRSI();
@@ -1272,10 +1263,6 @@ export function PriceChart({ symbol, timeframe }: Props) {
             .filter((c) => c.indicators?.ema_21 !== undefined)
             .map((c) => ({ time: c.time as UTCTimestamp, value: c.indicators!.ema_21! }));
           ema21Ref.current.setData(ema21Data);
-        }
-        const lastCandleWithInds = [...historyData].reverse().find(c => c.indicators !== undefined);
-        if (lastCandleWithInds?.indicators) {
-          setLiveIndicators(lastCandleWithInds.indicators);
         }
         updateEMAs();
         updateRSI();
@@ -1505,43 +1492,33 @@ export function PriceChart({ symbol, timeframe }: Props) {
         </div>
       )}
 
-      {/* Panel de Estado de Osciladores (RSI y MACD) */}
-      {liveIndicators && (
-        <div className="absolute right-3 bottom-3 z-10 flex items-center gap-5 rounded-lg border border-tv-border bg-tv-panel/90 px-4 py-2 text-xs text-tv-text backdrop-blur-md shadow-lg pointer-events-auto border-l-4 border-l-tv-blue">
-          {/* RSI */}
-          {liveIndicators.rsi !== undefined && (
-            <div className="flex items-center gap-1.5 border-r border-tv-border/50 pr-4">
-              <span className="font-semibold text-tv-text-muted">RSI (14):</span>
-              <span className={`font-mono font-bold ${
-                liveIndicators.rsi > 70 
-                  ? "text-tv-red animate-pulse" 
-                  : liveIndicators.rsi < 30 
-                    ? "text-tv-green animate-pulse" 
-                    : "text-tv-text"
-              }`}>
-                {liveIndicators.rsi.toFixed(2)}
-              </span>
-              <span className="text-[10px] text-tv-text-muted ml-1">
-                {liveIndicators.rsi > 70 ? "(Sobrecompra)" : liveIndicators.rsi < 30 ? "(Sobreventa)" : ""}
-              </span>
-            </div>
-          )}
-          {/* MACD */}
-          {liveIndicators.macd !== undefined && (
-            <div className="flex items-center gap-3">
-              <span className="font-semibold text-tv-text-muted">MACD (12, 26, 9):</span>
-              <div className="flex items-center gap-2 font-mono">
-                <span className="text-tv-blue" title="MACD Line">
-                  Line: <strong className="font-bold">{liveIndicators.macd.macd.toFixed(5)}</strong>
-                </span>
-                <span className="text-tv-yellow" title="Signal Line">
-                  Sig: <strong className="font-bold">{liveIndicators.macd.signal.toFixed(5)}</strong>
-                </span>
-                <span className={liveIndicators.macd.histogram >= 0 ? "text-tv-green" : "text-tv-red"} title="Histogram">
-                  Hist: <strong className="font-bold">{liveIndicators.macd.histogram.toFixed(5)}</strong>
-                </span>
-              </div>
-            </div>
+      {/* [BIAS] Panel de Bias del rango D1 (esquina inferior izquierda, sobre la escala de tiempo) */}
+      {dailyRange && (
+        <div className="absolute left-3 bottom-9 z-10 flex items-center gap-2.5 rounded-lg border border-tv-border bg-tv-panel/90 px-3.5 py-2 text-xs text-tv-text backdrop-blur-md shadow-lg pointer-events-auto">
+          <span className="font-semibold text-tv-text-muted">Bias D1</span>
+          <span
+            className={`rounded px-2 py-0.5 font-mono text-[11px] font-bold ${
+              dailyRange.bias === "BUY"
+                ? "bg-tv-green/15 text-tv-green"
+                : dailyRange.bias === "SELL"
+                  ? "bg-tv-red/15 text-tv-red"
+                  : "bg-tv-border/30 text-tv-text-muted"
+            }`}
+          >
+            {dailyRange.bias === "BUY"
+              ? "▲ BUY"
+              : dailyRange.bias === "SELL"
+                ? "▼ SELL"
+                : "● NEUTRO"}
+          </span>
+          {dailyRange.time > 0 && (
+            <span className="border-l border-tv-border/50 pl-2.5 text-[10px] text-tv-text-muted">
+              {new Date(dailyRange.time * 1000).toLocaleDateString("es-ES", {
+                day: "2-digit",
+                month: "2-digit",
+                timeZone: "UTC",
+              })}
+            </span>
           )}
         </div>
       )}
