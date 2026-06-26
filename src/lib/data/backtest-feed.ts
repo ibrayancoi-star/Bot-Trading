@@ -15,8 +15,22 @@ export function handleBacktestMessage(data: any) {
   switch (data.type) {
     case "backtest_candle":
       if (data.data) {
-        store.appendCandle(data.data);
+        store.appendBaseCandle(data.data);   // base 1m → el store agrega a la TF de visualización
       }
+      break;
+
+    case "backtest_anchor":
+      store.setAnchorRange({
+        high: data.high, low: data.low, eq: data.eq,
+        bias: data.bias, anchor_time: data.anchor_time, accumulation: data.accumulation,
+      });
+      break;
+
+    case "backtest_daily":
+      store.setDailyRange({
+        high: data.high, low: data.low, open: data.open, close: data.close,
+        bias: data.bias, time: data.time,
+      });
       break;
 
     case "backtest_trade":
@@ -89,3 +103,41 @@ export function stopBacktest() {
     console.log("📤 [Backtest Feed] Solicitando parada de backtest");
   }
 }
+
+export function startDataReplay(params: {
+  symbol: string;
+  timeframe: string;
+  from: string;
+  to: string;
+  speed: number;
+}) {
+  const ws = getSocket();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    useBacktestStore.getState().clearBacktest();
+    useBacktestStore.getState().setTimeframe(params.timeframe);  // TF de visualización inicial
+    useBacktestStore.getState().setStatus("running");
+    useBacktestStore.getState().setIsRunning(true);
+
+    ws.send(JSON.stringify({
+      type: "data_replay_start",
+      params
+    }));
+    console.log("📤 [Backtest Feed] Iniciando replay de datos:", params);
+  } else {
+    console.error("⚠️ WebSocket no conectado.");
+    useBacktestStore.getState().setError("MetaTrader 5 Bridge no conectado. Ejecuta `mt5_bridge.py` primero.");
+  }
+}
+
+export function stopDataReplay() {
+  const ws = getSocket();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "data_replay_stop"
+    }));
+    useBacktestStore.getState().setIsRunning(false);
+    useBacktestStore.getState().setStatus("idle");
+    console.log("📤 [Backtest Feed] Solicitando parada de replay de datos");
+  }
+}
+

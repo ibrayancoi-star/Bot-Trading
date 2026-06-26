@@ -61,3 +61,7 @@ chroma_db/
 
 # Log files
 *.log
+
+# Tick Cache
+/tick_cache/
+
