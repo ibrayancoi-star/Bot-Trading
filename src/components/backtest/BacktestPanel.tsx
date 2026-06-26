@@ -2,15 +2,14 @@
 
 import { useState } from "react";
 import { useBacktestStore } from "@/lib/store/backtest-store";
-import { startBacktest, stopBacktest } from "@/lib/data/backtest-feed";
+import { startBacktest, stopBacktest, startDataReplay, stopDataReplay } from "@/lib/data/backtest-feed";
 import { Button } from "@/components/ui/button";
 import { Play, Square, RotateCcw, Calendar, Shield, Sparkles, Sliders } from "lucide-react";
 
 export function BacktestPanel() {
-  const { isRunning, progress, status, errorMessage, clearBacktest } = useBacktestStore();
+  const { isRunning, progress, status, errorMessage, clearBacktest, timeframe, setTimeframe } = useBacktestStore();
 
   const [symbol, setSymbol] = useState("EURUSD");
-  const [timeframe, setTimeframe] = useState("1m");
   const [from, setFrom] = useState("2026-05-01");
   const [to, setTo] = useState("2026-06-01");
 
@@ -20,6 +19,9 @@ export function BacktestPanel() {
   const [stopLossPips, setStopLossPips] = useState(15);
   const [chromaThreshold, setChromaThreshold] = useState(0.72);
   const [chromaTopK, setChromaTopK] = useState(5);
+  
+  // Replay State
+  const [replaySpeed, setReplaySpeed] = useState(100);
 
   const handleStart = () => {
     startBacktest({
@@ -53,8 +55,19 @@ export function BacktestPanel() {
     });
   };
 
+  const handleStartReplay = () => {
+    startDataReplay({
+      symbol,
+      timeframe,
+      from,
+      to,
+      speed: replaySpeed,
+    });
+  };
+
   const handleStop = () => {
     stopBacktest();
+    stopDataReplay();
   };
 
   const handleClear = () => {
@@ -87,10 +100,9 @@ export function BacktestPanel() {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-[10px] uppercase font-bold text-tv-text-muted">Temporalidad</label>
+          <label className="text-[10px] uppercase font-bold text-tv-text-muted">Temporalidad {isRunning && <span className="text-tv-blue normal-case">(en vivo)</span>}</label>
           <select
             value={timeframe}
-            disabled={isRunning}
             onChange={(e) => setTimeframe(e.target.value)}
             className="w-full bg-tv-bg border border-tv-border rounded px-2.5 py-1.5 outline-none hover:bg-tv-panel-hover cursor-pointer"
           >
@@ -186,16 +198,44 @@ export function BacktestPanel() {
           </div>
         </div>
 
+        {/* Speed Selector */}
+        <div className="flex flex-col gap-1.5 bg-tv-bg/40 border border-tv-border rounded p-3">
+          <label className="text-[10px] uppercase font-bold text-tv-text-muted">Velocidad Replay</label>
+          <select
+            value={replaySpeed}
+            disabled={isRunning}
+            onChange={(e) => setReplaySpeed(Number(e.target.value))}
+            className="w-full bg-tv-bg border border-tv-border rounded px-2.5 py-1.5 outline-none hover:bg-tv-panel-hover cursor-pointer"
+          >
+            <option value="1">1x (Tiempo Real)</option>
+            <option value="10">10x</option>
+            <option value="50">50x</option>
+            <option value="100">100x</option>
+            <option value="500">500x</option>
+            <option value="1000">1000x</option>
+            <option value="5000">5000x</option>
+          </select>
+        </div>
+
         {/* Action Controls */}
-        <div className="flex flex-col gap-2 mt-2">
+        <div className="flex flex-col gap-2 mt-1">
           {!isRunning ? (
-            <Button
-              onClick={handleStart}
-              className="w-full h-10 bg-tv-blue hover:bg-tv-blue/90 text-white font-bold flex items-center justify-center gap-2"
-            >
-              <Play className="h-4 w-4" />
-              INICIAR BACKTEST
-            </Button>
+            <>
+              <Button
+                onClick={handleStart}
+                className="w-full h-10 bg-tv-blue hover:bg-tv-blue/90 text-white font-bold flex items-center justify-center gap-2"
+              >
+                <Play className="h-4 w-4" />
+                INICIAR BACKTEST
+              </Button>
+              <Button
+                onClick={handleStartReplay}
+                className="w-full h-10 bg-emerald-600 hover:bg-emerald-500 text-white font-bold flex items-center justify-center gap-2"
+              >
+                <Play className="h-4 w-4" />
+                REPRODUCIR DATOS (TICKS)
+              </Button>
+            </>
           ) : (
             <Button
               onClick={handleStop}

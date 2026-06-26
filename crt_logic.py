@@ -260,3 +260,25 @@ def calculate_crt_targets(crt_high: float, crt_low: float, direction: str) -> di
     else:
         return {"eq": eq, "tp1": eq, "tp2": crt_low}
 
+# [CRT-RANGE-QUALITY] Calidad de acumulacion de la vela de rango (refinamiento CRT).
+# Una "range candle" CRT representa acumulacion (indecision + compresion), no un impulso
+# direccional. Condensa a una sola vela H4 las ideas isConsolidated / isHighVolume del modelo AMD.
+def is_accumulation_candle(candle: dict, atr_price: float, vol: float, vol_ma: float,
+                           body_max_ratio: float = 0.5, range_atr_mult: float = 1.5) -> bool:
+    """
+    True si la vela parece acumulacion:
+      1. Cuerpo pequeno respecto a su rango (indecision): |close-open| <= rango * body_max_ratio
+      2. Rango comprimido respecto al ATR:                rango <= atr_price * range_atr_mult
+      3. Volumen >= su media (participacion):             vol >= vol_ma
+    Constantes fijas (sin configuracion/UI). Tolerante a datos faltantes: atr<=0 omite (2),
+    vol_ma<=0 omite (3).
+    """
+    rng = float(candle["high"]) - float(candle["low"])
+    if rng <= 0:
+        return False
+    body = abs(float(candle["close"]) - float(candle["open"]))
+    body_ok = body <= rng * body_max_ratio
+    range_ok = (atr_price <= 0) or (rng <= atr_price * range_atr_mult)
+    vol_ok = (vol_ma <= 0) or (vol >= vol_ma)
+    return body_ok and range_ok and vol_ok
+

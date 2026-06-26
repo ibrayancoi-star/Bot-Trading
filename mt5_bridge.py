@@ -4,6 +4,7 @@ import logging
 import sys
 import MetaTrader5 as mt5
 import websockets
+from websockets.exceptions import ConnectionClosed
 import subprocess
 import os
 import datetime
@@ -31,7 +32,7 @@ def _to_canary(utc_naive_dt):
 # Las nuevas funcionalidades CRT usarán crt_logic.py exclusivamente.
 # NOTA: el log se emite después de configurar el logger (ver bloque post-logger)
 try:
-    from crt_logic import classify_sweep_type, check_smt_divergence, calculate_dynamic_sl, calculate_crt_targets
+    from crt_logic import classify_sweep_type, check_smt_divergence, calculate_dynamic_sl, calculate_crt_targets, is_accumulation_candle
     CRT_LOGIC_AVAILABLE = True
     _crt_logic_import_error = None
 except ImportError as e:
@@ -39,6 +40,7 @@ except ImportError as e:
     _crt_logic_import_error = str(e)
 
 _backtest_running = False
+_replay_gen = 0  # token de generación: cada start lo incrementa; el bucle viejo muere si cambia
 
 
 @dataclass
@@ -157,13 +159,21 @@ last_ticks = {
 }
 
 # Rangos de referencia anclados para EURUSD y GBPUSD
+# anchor_ts: epoch del tiempo de apertura de la vela H4 anclada (sticky anchor)
+# high_taken/low_taken: extremos ya barridos desde la selección (ciclo CRT: ambos tomados -> reseleccionar)
 anchor_ranges = {
-    "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4", "bias": "NEUTRO"},
-    "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "candle_type": "H4", "bias": "NEUTRO"}
+    "EURUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "anchor_ts": 0, "candle_type": "H4", "bias": "NEUTRO", "high_taken": False, "low_taken": False},
+    "GBPUSD": {"high": 0.0, "low": 0.0, "eq": 0.0, "anchor_time": "Ninguno", "anchor_ts": 0, "candle_type": "H4", "bias": "NEUTRO", "high_taken": False, "low_taken": False}
 }
 
-# [RANGE-TOL] Tolerancia de ruptura por cierre, por par (en pips). Un cierre solo invalida
-# el rango si supera high+tol o low-tol. Fuente: verify_range_logic.py / check_ranges.py
+# Cache de rangos D1 para sticky anchor: mantener mientras siga válido por cuerpo posterior
+daily_ranges = {
+    "EURUSD": {"high": 0.0, "low": 0.0, "open": 0.0, "close": 0.0, "ref_ts": 0, "bias": "NEUTRO", "high_taken": False, "low_taken": False},
+    "GBPUSD": {"high": 0.0, "low": 0.0, "open": 0.0, "close": 0.0, "ref_ts": 0, "bias": "NEUTRO", "high_taken": False, "low_taken": False},
+}
+
+# [RANGE-TOL] Tolerancia (en pips) — preservada por compatibilidad de cálculo de `tol` aunque
+# `_h4_range_broken` ya no la use (regla actual: rotura por CUERPO posterior, sin tolerancia).
 _H4_TOLERANCE_PIPS = {"EURUSD": 2.5, "GBPUSD": 3.0}
 
 # [CRT-IMPL-3] Buffer de confirmacion de sweep por cierre de vela
@@ -508,72 +518,21 @@ def get_current_atr(broker_sym, timeframe, period=14):
         logger.error(f"Error al calcular ATR para {broker_sym}: {e}")
         return 12.0
 
-def _h4_range_broken(cand_high: float, cand_low: float, later, tol: float) -> bool:
-    """
-    Determina si una vela candidata fue invalidada por velas posteriores.
-    Reglas (port de verify_range_logic.py):
-    1. Ruptura por cierre FUERA de tolerancia: close > high+tol  ó  close < low-tol.
-    2. RANGO AGOTADO: una vela posterior toma ambos extremos, o se toma un extremo y
-       luego (en otra vela) el opuesto. Usa mechas (high/low) para "tomar" un extremo.
-    `later` incluye las cerradas siguientes Y la vela en formación.
-    """
-    low_taken = False
-    high_taken = False
-    for c in later:
-        close = float(c["close"])
-        if close > cand_high + tol:
-            return True
-        if close < cand_low - tol:
-            return True
-
-        took_low = float(c["low"]) <= cand_low
-        took_high = float(c["high"]) >= cand_high
-
-        if took_low and took_high:
-            return True
-        if low_taken and took_high:
-            return True
-        if high_taken and took_low:
-            return True
-
-        if took_low:
-            low_taken = True
-        if took_high:
-            high_taken = True
-    return False
-
-
-def _compute_range_bias(ref_high: float, ref_low: float, after, current_bid: float) -> str:
-    """
-    Bias direccional de un rango (port de verify_range_logic.py):
-    high tomado -> SELL (esperamos reversión bajista), low tomado -> BUY.
-    Gana el último extremo tomado; el precio actual tiene la última palabra.
-    `after` debe incluir las velas posteriores al rango Y la vela en formación.
-    """
-    bias = "NEUTRO"
-    for c in after:
-        if float(c["high"]) >= ref_high:
-            bias = "SELL"
-        if float(c["low"]) <= ref_low:
-            bias = "BUY"
-    if current_bid >= ref_high:
-        bias = "SELL"
-    if current_bid <= ref_low:
-        bias = "BUY"
-    return bias
+# [CRT-ENGINE] Helpers de rango movidos al núcleo puro `crt_engine.py` (fuente de verdad única
+# compartida con el backtest). Se importan con alias para conservar los nombres internos.
+from crt_engine import (
+    select_range,
+    range_broken_by_body as _h4_range_broken,
+    extremes_taken as _extremes_taken,
+    compute_range_bias as _compute_range_bias,
+)
 
 
 def update_reference_ranges():
     """
-    Selecciona la vela H4 de anclaje (CRT range candle) = la última vela cerrada cuyo
-    rango NO fue roto, aplicando tolerancia por par y la regla de rango agotado.
-
-    Regla (port fiel de verify_range_logic.py / check_ranges.py):
-    1. La vela en formación NO es candidata, pero SÍ evalúa (puede romper/agotar).
-    2. Invalidación por cierre solo si supera high+tol / low-tol (tolerancia por par).
-    3. Invalidación por rango agotado: velas posteriores tomaron ambos extremos.
-    4. Se elige la MÁS RECIENTE cerrada no rota (escaneo nuevo->viejo).
-    Además calcula el BIAS direccional y lo difunde a la web.
+    Adaptador DEMO de la selección de rango H4: trae velas de MT5, delega la DECISIÓN en
+    `crt_engine.select_range` (misma lógica que el backtest) y persiste/difunde el resultado.
+    La regla CRT vive en crt_engine.py (cuerpo de cerradas + ciclo de extremos + sticky).
     """
     global MT5_INITIALIZED, anchor_ranges
     if not MT5_INITIALIZED:
@@ -593,45 +552,62 @@ def update_reference_ranges():
             current_bid = tick.bid
 
             pip_value = 0.01 if "JPY" in symbol.upper() else 0.0001
-            tol = _H4_TOLERANCE_PIPS.get(symbol, 2.5) * pip_value
 
             forming = rates_h4[-1]          # en formación: evalúa pero no es candidata
             closed = rates_h4[:-1]          # solo cerradas son candidatas
 
-            reference = None
-            # Escanear de la MÁS RECIENTE cerrada hacia atrás: la primera no rota es el rango.
-            for i in range(len(closed) - 1, -1, -1):
-                cand = closed[i]
-                later = list(closed[i + 1:]) + [forming]
-                if not _h4_range_broken(float(cand["high"]), float(cand["low"]), later, tol):
-                    reference = cand
-                    break
+            # Datos para el refinamiento de calidad de acumulación (sin llamadas extra:
+            # tick_volume ya viene en rates_h4; ATR usa el helper existente y va en pips).
+            atr_price = get_current_atr(broker_sym, mt5.TIMEFRAME_H4, 14) * pip_value
+            _vols = [float(c["tick_volume"]) for c in closed]
+            vol_ma = sum(_vols) / len(_vols) if _vols else 0.0
 
-            # Fallback: ninguna válida -> usar la última cerrada
-            if reference is None:
-                reference = closed[-1]
+            # [CRT-ENGINE] Selección de rango vía núcleo compartido (misma lógica que el backtest).
+            prev = anchor_ranges[symbol]
+            prev_bias = prev.get("bias")
+            prev_state = {
+                "high": float(prev.get("high", 0.0)),
+                "low": float(prev.get("low", 0.0)),
+                "ref_ts": int(prev.get("anchor_ts", 0) or 0),
+                "high_taken": bool(prev.get("high_taken", False)),
+                "low_taken": bool(prev.get("low_taken", False)),
+                "accumulation": bool(prev.get("accumulation", False)),
+            }
+            rs = select_range(closed, forming, prev_state, current_bid,
+                              compute_accumulation=CRT_LOGIC_AVAILABLE,
+                              atr_price=atr_price, vol_ma=vol_ma)
+            if rs is None:
+                continue
 
-            high = float(reference["high"])
-            low = float(reference["low"])
-            eq = low + 0.5 * (high - low)
-            candle_dt = datetime.datetime.utcfromtimestamp(int(reference["time"]))
+            high = rs["high"]
+            low = rs["low"]
+            ref_time = rs["ref_ts"]
+            eq = rs["eq"]
+            bias = rs["bias"]
+            is_accum = bool(rs["accumulation"])
+            high_taken = rs["high_taken"]
+            low_taken = rs["low_taken"]
+            candle_dt = datetime.datetime.fromtimestamp(ref_time, tz=datetime.timezone.utc)
             anchor_label = f"H4 {candle_dt.strftime('%d/%m %H:%M')} UTC"
 
-            # Bias: velas posteriores al rango (cerradas + en formación) y precio actual
-            ref_time = int(reference["time"])
-            after = [c for c in rates_h4 if int(c["time"]) > ref_time]
-            bias = _compute_range_bias(high, low, after, current_bid)
+            changed = (prev_state["high"] != high or prev_state["low"] != low
+                       or prev_bias != bias or prev_state["ref_ts"] != ref_time)
 
-            prev = anchor_ranges[symbol]
-            if prev["high"] != high or prev["low"] != low or prev.get("bias") != bias:
-                anchor_ranges[symbol].update({
-                    "high": high,
-                    "low": low,
-                    "eq": eq,
-                    "anchor_time": anchor_label,
-                    "bias": bias,
-                })
-                logger.info(f"[H4-ANCHOR] {symbol} | bid={current_bid:.5f} | ✅ {anchor_label} H={high:.5f} L={low:.5f} EQ={eq:.5f} BIAS={bias}")
+            # Persistir SIEMPRE el estado (incluye el ciclo de extremos) para el sticky.
+            anchor_ranges[symbol].update({
+                "high": high,
+                "low": low,
+                "eq": eq,
+                "anchor_time": anchor_label,
+                "anchor_ts": ref_time,
+                "bias": bias,
+                "accumulation": is_accum,
+                "high_taken": high_taken,
+                "low_taken": low_taken,
+            })
+
+            if changed:
+                logger.info(f"[H4-ANCHOR] {symbol} | bid={current_bid:.5f} | ✅ {anchor_label} H={high:.5f} L={low:.5f} EQ={eq:.5f} BIAS={bias} ACUM={is_accum}")
 
                 asyncio.create_task(broadcast({
                     "type": "anchor_update",
@@ -641,6 +617,7 @@ def update_reference_ranges():
                     "eq": eq,
                     "anchor_time": anchor_label,
                     "bias": bias,
+                    "accumulation": is_accum,
                 }))
                 asyncio.create_task(emit_daily_range(None))
     except Exception as e:
@@ -670,70 +647,62 @@ async def emit_daily_range(target):
         current_bid = tick.bid
 
         from datetime import datetime
-        reference = None
 
-        logger.info(f"[D1-RANGE] === {symbol} | bid={current_bid:.5f} | {len(rates_d1)} velas cerradas ===")
+        # Vela D1 en formación: NO es candidata ni invalida por cuerpo (no ha cerrado),
+        # pero SÍ cuenta para el barrido de extremos (ciclo CRT).
+        forming_d1_rates = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_D1, 0, 1)
+        forming_d1 = forming_d1_rates[0] if (forming_d1_rates is not None and len(forming_d1_rates) > 0) else None
 
-        for i in range(len(rates_d1) - 1, -1, -1):
-            wick_high = float(rates_d1[i]["high"])
-            wick_low = float(rates_d1[i]["low"])
-            candle_date = datetime.fromtimestamp(int(rates_d1[i]["time"])).strftime("%d/%m")
+        # [CRT-ENGINE] Selección de rango D1 vía núcleo compartido (misma lógica que el backtest).
+        prev = daily_ranges[symbol]
+        prev_state = {
+            "high": float(prev.get("high", 0.0)),
+            "low": float(prev.get("low", 0.0)),
+            "ref_ts": int(prev.get("ref_ts", 0) or 0),
+            "open": float(prev.get("open", 0.0)),
+            "close": float(prev.get("close", 0.0)),
+            "high_taken": bool(prev.get("high_taken", False)),
+            "low_taken": bool(prev.get("low_taken", False)),
+        }
+        rs = select_range(list(rates_d1), forming_d1, prev_state, current_bid)
+        if rs is None:
+            continue
 
-            # Condición 1: el precio actual debe estar DENTRO del rango
-            if current_bid > wick_high or current_bid < wick_low:
-                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ⏭️ Precio fuera del rango")
-                continue
+        ref_high_d1 = rs["high"]
+        ref_low_d1 = rs["low"]
+        ref_time_d1 = rs["ref_ts"]
+        ref_open_d1 = rs["ref_open"]
+        ref_close_d1 = rs["ref_close"]
+        bias_d1 = rs["bias"]
+        high_taken_d1 = rs["high_taken"]
+        low_taken_d1 = rs["low_taken"]
 
-            # Condición 2: ninguna vela CERRADA posterior superó con cuerpo
-            superado = False
-            rota_por = ""
-            for j in range(i + 1, len(rates_d1)):
-                body_top = max(float(rates_d1[j]["open"]), float(rates_d1[j]["close"]))
-                body_bot = min(float(rates_d1[j]["open"]), float(rates_d1[j]["close"]))
-                breaker_date = datetime.fromtimestamp(int(rates_d1[j]["time"])).strftime("%d/%m")
+        ref_date = datetime.fromtimestamp(ref_time_d1).strftime("%d/%m")
+        if rs["kept"]:
+            logger.info(f"[D1-RANGE] {symbol} | bid={current_bid:.5f} | ↪ se mantiene {ref_date} | BIAS={bias_d1}")
+        else:
+            logger.info(f"[D1-RANGE] {symbol} | bid={current_bid:.5f} | ✅ {ref_date} H={ref_high_d1:.5f} L={ref_low_d1:.5f} | BIAS={bias_d1}")
 
-                if body_top > wick_high:
-                    superado = True
-                    rota_por = f"HIGH roto por {breaker_date} (body={body_top:.5f} > high={wick_high:.5f})"
-                    break
-                if body_bot < wick_low:
-                    superado = True
-                    rota_por = f"LOW roto por {breaker_date} (body={body_bot:.5f} < low={wick_low:.5f})"
-                    break
-
-            if superado:
-                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ❌ {rota_por}")
-            else:
-                logger.info(f"[D1-RANGE] {candle_date} | H={wick_high:.5f} L={wick_low:.5f} | ✅ VÁLIDA")
-                reference = rates_d1[i]
-                logger.info(f"[D1-RANGE] → REFERENCIA: {candle_date}")
-                break
-
-        if reference is None:
-            reference = rates_d1[-1]
-            fallback_date = datetime.fromtimestamp(int(reference["time"])).strftime("%d/%m")
-            logger.info(f"[D1-RANGE] → FALLBACK: {fallback_date}")
-
-        # [BIAS-D1] Bias direccional sobre el rango D1. Incluye la vela D1 en formación
-        # para detectar el barrido aunque el precio ya haya vuelto dentro del rango.
-        ref_high_d1 = float(reference["high"])
-        ref_low_d1 = float(reference["low"])
-        ref_time_d1 = int(reference["time"])
-        after_d1 = [c for c in rates_d1 if int(c["time"]) > ref_time_d1]
-        forming_d1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_D1, 0, 1)
-        if forming_d1 is not None and len(forming_d1) > 0:
-            after_d1 = list(after_d1) + [forming_d1[0]]
-        bias_d1 = _compute_range_bias(ref_high_d1, ref_low_d1, after_d1, current_bid)
-        logger.info(f"[D1-RANGE] {symbol} → BIAS: {bias_d1}")
+        # Persistir el rango activo (sticky cache) tras esta evaluación
+        daily_ranges[symbol].update({
+            "high": ref_high_d1,
+            "low": ref_low_d1,
+            "open": ref_open_d1,
+            "close": ref_close_d1,
+            "ref_ts": ref_time_d1,
+            "bias": bias_d1,
+            "high_taken": high_taken_d1,
+            "low_taken": low_taken_d1,
+        })
 
         msg = {
             "type": "daily_range",
             "symbol": symbol,
-            "high": round(float(reference["high"]), 5),
-            "low": round(float(reference["low"]), 5),
-            "open": round(float(reference["open"]), 5),
-            "close": round(float(reference["close"]), 5),
-            "time": int(reference["time"]),
+            "high": round(ref_high_d1, 5),
+            "low": round(ref_low_d1, 5),
+            "open": round(ref_open_d1, 5),
+            "close": round(ref_close_d1, 5),
+            "time": ref_time_d1,
             "bias": bias_d1
         }
 
@@ -886,7 +855,7 @@ async def strategy_scanner_task():
                     if crt_high == 0.0 or crt_low == 0.0:
                         continue # No hay velas de anclaje inicializadas aún
 
-                    # [CRT-IMPL-3] Procesar confirmación de sweep pendiente si existe
+                    # [CRT-IMPL-3] Confirmación de sweep pendiente (modelo de UNA vela / turtle soup)
                     if symbol in _sweep_pending and bot_config.require_candle_confirmation:
                         pendiente = _sweep_pending[symbol]
                         elapsed = (datetime.datetime.utcnow() - pendiente["timestamp"]).total_seconds()
@@ -894,24 +863,36 @@ async def strategy_scanner_task():
                             logger.info(f"[CRT] {symbol} sweep timeout - descartado")
                             del _sweep_pending[symbol]
                             continue
-                        rates_m1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_M1, 0, 2)
+                        rates_m1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_M1, 0, 5)
                         if rates_m1 is None or len(rates_m1) < 2:
                             continue
-                        vela_3_candidate = {"open": float(rates_m1[0]["open"]), "high": float(rates_m1[0]["high"]), "low": float(rates_m1[0]["low"]), "close": float(rates_m1[0]["close"]), "time": rates_m1[0]["time"]}
-                        if vela_3_candidate["time"] <= pendiente["vela_2"]["time"]:
+                        sweep_time = pendiente["sweep_candle_time"]
+                        # La vela de barrido sigue en formación si la última (en formación) es esa misma.
+                        if int(rates_m1[-1]["time"]) <= sweep_time:
                             continue
-                        resultado = classify_sweep_type(pendiente["vela_2"], vela_3_candidate, pendiente["crt_high"], pendiente["crt_low"], pendiente["direction"])
+                        # Buscar la vela de barrido YA CERRADA por su time.
+                        sweep_candle = None
+                        for r in rates_m1:
+                            if int(r["time"]) == sweep_time:
+                                sweep_candle = {"open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"]), "time": int(r["time"])}
+                                break
+                        if sweep_candle is None:
+                            logger.info(f"[CRT] {symbol} vela de barrido fuera de buffer - descartado")
+                            del _sweep_pending[symbol]
+                            continue
+                        # Confirmación de UNA vela: la misma vela barre (mecha fuera) y cierra dentro.
+                        resultado = classify_sweep_type(sweep_candle, sweep_candle, pendiente["crt_high"], pendiente["crt_low"], pendiente["direction"])
                         if resultado["type"] == "INVALID":
-                            logger.info(f"[CRT] {symbol} Vela 3 no confirmo - sweep descartado")
+                            logger.info(f"[CRT] {symbol} vela de barrido no cerró dentro del rango - sweep descartado")
                             del _sweep_pending[symbol]
                             continue
                         direction = pendiente["direction"]
                         sweep_type = resultado["type"]
                         sweep_confidence = resultado["confidence"]
-                        sweep_vela_2 = pendiente["vela_2"]
+                        sweep_vela_2 = sweep_candle
                         del _sweep_pending[symbol]
-                        logger.info(f"[CRT] {symbol} sweep CONFIRMADO: {sweep_type} (confianza {sweep_confidence:.2f})")
-                        
+                        logger.info(f"[CRT] {symbol} sweep CONFIRMADO (1 vela): {sweep_type} (confianza {sweep_confidence:.2f})")
+
                         price = tick.bid if direction == "SELL" else tick.ask
                     else:
                         sweep_type = None
@@ -949,9 +930,10 @@ async def strategy_scanner_task():
                                 if symbol not in _sweep_pending:
                                     rates_m1 = mt5.copy_rates_from_pos(broker_sym, mt5.TIMEFRAME_M1, 0, 2)
                                     if rates_m1 is not None and len(rates_m1) >= 2:
-                                        vela_2 = {"open": float(rates_m1[0]["open"]), "high": float(rates_m1[0]["high"]), "low": float(rates_m1[0]["low"]), "close": float(rates_m1[0]["close"]), "time": rates_m1[0]["time"]}
-                                        _sweep_pending[symbol] = {"direction": direction, "vela_2": vela_2, "crt_high": crt_high, "crt_low": crt_low, "timestamp": datetime.datetime.utcnow()}
-                                        logger.info(f"[CRT] {symbol} sweep pendiente de confirmacion ({direction}) - esperando Vela 3")
+                                        # rates_m1[-1] = vela EN FORMACIÓN = la que está barriendo el nivel.
+                                        sweep_candle_time = int(rates_m1[-1]["time"])
+                                        _sweep_pending[symbol] = {"direction": direction, "sweep_candle_time": sweep_candle_time, "crt_high": crt_high, "crt_low": crt_low, "timestamp": datetime.datetime.utcnow()}
+                                        logger.info(f"[CRT] {symbol} sweep pendiente ({direction}) - esperando cierre de la vela de barrido")
                                 continue
 
                     if direction is not None:
@@ -1087,6 +1069,16 @@ async def strategy_scanner_task():
                             volume = max(volume, 0.01)
                             logger.info(f"[CRT] Lotaje ajustado por {sweep_type}: {volume} (x{multiplier})")
                         
+                        # [ORDER-FIX-1] Redondear precios a los dígitos del símbolo
+                        sym_info = mt5.symbol_info(broker_sym)
+                        digits = sym_info.digits if sym_info else 5
+
+                        price = round(price, digits)
+                        if sl_price is not None and sl_price > 0:
+                            sl_price = round(sl_price, digits)
+                        if tp_price is not None and tp_price > 0:
+                            tp_price = round(tp_price, digits)
+
                         request = {
                             "action": mt5.TRADE_ACTION_DEAL,
                             "symbol": broker_sym,
@@ -1315,28 +1307,46 @@ async def send_to_client(websocket, message_dict):
     """Envía un mensaje JSON a un cliente específico."""
     try:
         await websocket.send(json.dumps(message_dict))
+    except ConnectionClosed:
+        return  # cliente desconectado (recarga/cierre): normal, no es error, no spamear
     except Exception as e:
         logger.error(f"Error al enviar mensaje a cliente específico: {e}")
 
 def try_order_send(request):
     """Intenta enviar una orden a MT5 probando múltiples modos de filling."""
-    filling_modes = [
-        mt5.ORDER_FILLING_IOC,
-        mt5.ORDER_FILLING_FOK,
-        mt5.ORDER_FILLING_RETURN
-    ]
-    
-    result = None
-    for mode in filling_modes:
-        request["type_filling"] = mode
-        result = mt5.order_send(request)
-        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-            return result
+    broker_sym = request.get("symbol")
+    # [ORDER-FIX-2] Filling modes según lo que el símbolo realmente acepta
+    sym_info = mt5.symbol_info(broker_sym) if broker_sym else None
+    fm = sym_info.filling_mode if sym_info else 0
+    filling_modes = []
+    if fm & 1:  # bit 1 = FOK soportado
+        filling_modes.append(mt5.ORDER_FILLING_FOK)
+    if fm & 2:  # bit 2 = IOC soportado
+        filling_modes.append(mt5.ORDER_FILLING_IOC)
+    if fm & 4:  # bit 4 = RETURN soportado
+        filling_modes.append(mt5.ORDER_FILLING_RETURN)
+    # Fallback por si el bitmask viene en 0
+    if not filling_modes:
+        filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC]
         
-        retcode = result.retcode if result else "None"
-        comment = result.comment if result else "No result"
-        logger.warning(f"MT5: Filling mode {mode} rechazado ({retcode}: {comment}), probando otro...")
-    
+    result = None
+    for fmode in filling_modes:
+        request["type_filling"] = fmode
+        result = mt5.order_send(request)
+        if result is None:
+            logger.warning(f"MT5: order_send devolvió None con filling {fmode}. "
+                           f"last_error: {mt5.last_error()}")
+            continue
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"[ORDER] Ejecutado con filling {fmode}, "
+                        f"ticket: {result.order}")
+            return result
+        else:
+            logger.warning(f"MT5: filling {fmode} rechazado. "
+                           f"retcode={result.retcode} comment={result.comment}")
+    # Si ninguno funcionó, loguear el último error con detalle
+    logger.error(f"[ORDER] Falló ejecución en {broker_sym}. "
+                 f"Último retcode: {result.retcode if result else 'None'}")
     return result
 
 def panic_close_all_positions():
@@ -1480,30 +1490,15 @@ async def run_backtest(params, websocket):
     global _backtest_running
     _backtest_running = True
     try:
-        symbol = params.get("symbol", "EURUSD")
-        timeframe = params.get("timeframe", "1m")
-        from_date_str = params.get("from")
-        to_date_str = params.get("to")
-        config = params.get("config", {})
-        
-        # Convert dates
-        date_from = datetime.datetime.strptime(from_date_str, "%Y-%m-%d")
-        date_to = datetime.datetime.strptime(to_date_str, "%Y-%m-%d")
-        
-        from backtesting_engine import DataLayer, SimEngine
-        
-        # Preflight Check
-        df = DataLayer.get_historical_data(symbol, timeframe, date_from, date_to)
-        h4_from = date_from - datetime.timedelta(days=5)
-        h4_df = DataLayer.get_historical_data(symbol, "4h", h4_from, date_to)
-        
-        async def ws_send_fn(msg):
-            await send_to_client(websocket, msg)
-            
-        def is_running_check_fn():
-            return _backtest_running
-            
-        await SimEngine.run(df, h4_df, symbol, config, ws_send_fn, is_running_check_fn)
+        # [MIGRACIÓN MOTOR CRT] El backtest viejo (backtesting_engine.SimEngine) usa lógica CRT
+        # divergente del demo (find_anchor_candle, check_sweep, validate_hard_rules 7-arg). Está
+        # deshabilitado hasta que se reescriba sobre crt_engine (tarea #4). Mientras tanto,
+        # respondemos con un error claro y proponemos el Replay de ticks.
+        await send_to_client(websocket, {
+            "type": "backtest_error",
+            "message": "Backtest viejo deshabilitado durante la migración al motor CRT unificado. Usa 'Reproducir datos (ticks)' por ahora."
+        })
+        return
     except Exception as e:
         logger.exception("Error en backtest")
         await send_to_client(websocket, {
@@ -1512,6 +1507,240 @@ async def run_backtest(params, websocket):
         })
     finally:
         _backtest_running = False
+
+
+async def run_data_replay(params, websocket):
+    global _backtest_running
+    _backtest_running = True
+    my_gen = _replay_gen   # si otro start incrementa _replay_gen, este bucle debe morir
+    try:
+        symbol = params.get("symbol", "EURUSD")
+        from_date_str = params.get("from")
+        to_date_str = params.get("to")
+        speed = float(params.get("speed", 100))
+
+        # Convert dates
+        date_from = datetime.datetime.strptime(from_date_str, "%Y-%m-%d").date()
+        date_to = datetime.datetime.strptime(to_date_str, "%Y-%m-%d").date()
+
+        from tick_data import load_ticks, build_bars
+
+        # Notify progress starting
+        await send_to_client(websocket, {
+            "type": "backtest_progress",
+            "data": {"current": 0, "total": 100}
+        })
+
+        loop = asyncio.get_running_loop()
+        # Ticks de la ventana de replay. El stream de velas va en BASE 1m; la TF de visualización
+        # la agrega el frontend al vuelo (navegación de temporalidades sin re-stream).
+        ticks = await loop.run_in_executor(None, load_ticks, symbol, date_from, date_to)
+        time_msc, bid, ask = ticks
+        if len(time_msc) == 0:
+            raise Exception(f"No se encontraron ticks para {symbol} en el rango {from_date_str} a {to_date_str}")
+
+        # [RANGOS] Warmup: barras CERRADAS H4/D1 previas a la ventana, reconstruidas desde ticks,
+        # para que crt_engine.select_range tenga histórico desde el primer instante (igual que el demo
+        # usa ~60 H4). Si el bróker no llega tan atrás, se usa lo disponible.
+        h4_closed = []
+        d1_closed = []
+        warm_from = date_from - datetime.timedelta(days=12)
+        warm_to = date_from - datetime.timedelta(days=1)
+        if warm_to >= warm_from:
+            warm_ticks = await loop.run_in_executor(None, load_ticks, symbol, warm_from, warm_to)
+            if len(warm_ticks[0]) > 0:
+                h4_closed = build_bars(warm_ticks, 14400)
+                d1_closed = build_bars(warm_ticks, 86400)
+        # build_bars usa "volume"; select_range/is_accumulation_candle esperan "tick_volume".
+        for _b in h4_closed:
+            _b["tick_volume"] = _b.get("volume", 0)
+        for _b in d1_closed:
+            _b["tick_volume"] = _b.get("volume", 0)
+
+        TF_BASE = 60        # 1m: granularidad del stream de velas
+        H4_S = 14400
+        D1_S = 86400
+
+        logger.info(f"Replay: Iniciando {symbol} base 1m ({len(time_msc)} ticks, warmup H4={len(h4_closed)} D1={len(d1_closed)}) @ {speed}x...")
+
+        current_candle = None     # vela 1m en formación
+        h4_forming = None
+        d1_forming = None
+        h4_state = None           # estado sticky local (réplica de anchor_ranges del demo)
+        d1_state = None
+
+        last_sent_real_time = 0.0
+        throttle_seconds = 0.05   # máx ~20 updates/s para la vela en formación y los rangos
+
+        first_tick_msc = int(time_msc[0])
+        start_real_time = time.time()
+        total_ticks = len(time_msc)
+
+        def _fold(forming, closed_list, bucket, b_val):
+            """Actualiza la barra en formación; al cruzar de bucket cierra la previa.
+            Devuelve (forming, just_closed)."""
+            if forming is None or bucket > forming["time"]:
+                just = forming is not None and bucket > forming["time"]
+                if just:
+                    closed_list.append(forming)
+                new = {"time": bucket, "open": b_val, "high": b_val, "low": b_val,
+                       "close": b_val, "volume": 1, "tick_volume": 1}
+                return new, just
+            if b_val > forming["high"]:
+                forming["high"] = b_val
+            if b_val < forming["low"]:
+                forming["low"] = b_val
+            forming["close"] = b_val
+            forming["volume"] += 1
+            forming["tick_volume"] += 1
+            return forming, False
+
+        def _atr_price(bars, period=14):
+            if len(bars) < 2:
+                return 0.0
+            seg = bars[-(period + 1):]
+            s = 0.0
+            n = 0
+            for i in range(1, len(seg)):
+                h = seg[i]["high"]
+                l = seg[i]["low"]
+                pc = seg[i - 1]["close"]
+                s += max(h - l, abs(h - pc), abs(l - pc))
+                n += 1
+            return s / n if n else 0.0
+
+        async def emit_ranges(cur_bid):
+            """Calcula los rangos H4 (operativo) y D1 (contexto) con el MISMO motor que el demo
+            (crt_engine.select_range) y los emite al chart de backtest."""
+            nonlocal h4_state, d1_state
+            if getattr(websocket, "close_code", None) is not None:
+                return
+            # H4 — rango operativo (con acumulación, igual que update_reference_ranges)
+            if h4_closed or h4_forming is not None:
+                atrp = _atr_price(h4_closed, 14)
+                vols = [c.get("tick_volume", 0) for c in h4_closed]
+                vol_ma = (sum(vols) / len(vols)) if vols else 0.0
+                rs = select_range(h4_closed, h4_forming, h4_state, cur_bid,
+                                  compute_accumulation=True, atr_price=atrp, vol_ma=vol_ma)
+                if rs is not None:
+                    h4_state = rs
+                    ref_dt = datetime.datetime.fromtimestamp(rs["ref_ts"], tz=datetime.timezone.utc)
+                    await send_to_client(websocket, {
+                        "type": "backtest_anchor",
+                        "symbol": symbol,
+                        "high": rs["high"], "low": rs["low"], "eq": rs["eq"],
+                        "bias": rs["bias"], "accumulation": rs["accumulation"],
+                        "anchor_time": f"H4 {ref_dt.strftime('%d/%m %H:%M')} UTC",
+                    })
+            # D1 — contexto (igual que emit_daily_range)
+            if d1_closed or d1_forming is not None:
+                rs_d = select_range(d1_closed, d1_forming, d1_state, cur_bid)
+                if rs_d is not None:
+                    d1_state = dict(rs_d)
+                    d1_state["open"] = rs_d["ref_open"]    # kept-branch de select_range usa open/close
+                    d1_state["close"] = rs_d["ref_close"]
+                    await send_to_client(websocket, {
+                        "type": "backtest_daily",
+                        "symbol": symbol,
+                        "high": rs_d["high"], "low": rs_d["low"],
+                        "open": rs_d["ref_open"], "close": rs_d["ref_close"],
+                        "bias": rs_d["bias"], "time": rs_d["ref_ts"],
+                    })
+
+        for idx in range(total_ticks):
+            if (not _backtest_running or _replay_gen != my_gen
+                    or getattr(websocket, "close_code", None) is not None):
+                logger.info("Replay detenido (stop, nuevo replay, o cliente desconectado).")
+                break
+
+            t_msc = int(time_msc[idx])
+            b_val = float(bid[idx])
+            t_sec = t_msc // 1000
+
+            # --- vela base 1m (lo que se streamea; el frontend agrega a la TF elegida) ---
+            base_bucket = int((t_sec // TF_BASE) * TF_BASE)
+            is_new_candle = False
+            if current_candle is None:
+                current_candle = {"time": base_bucket, "open": b_val, "high": b_val,
+                                  "low": b_val, "close": b_val, "volume": 1, "isFinal": False}
+            elif base_bucket > current_candle["time"]:
+                current_candle["isFinal"] = True
+                await send_to_client(websocket, {"type": "backtest_candle", "data": current_candle})
+                current_candle = {"time": base_bucket, "open": b_val, "high": b_val,
+                                  "low": b_val, "close": b_val, "volume": 1, "isFinal": False}
+                is_new_candle = True
+            else:
+                if b_val > current_candle["high"]:
+                    current_candle["high"] = b_val
+                if b_val < current_candle["low"]:
+                    current_candle["low"] = b_val
+                current_candle["close"] = b_val
+                current_candle["volume"] += 1
+
+            # --- barras en formación H4/D1 para los rangos ---
+            h4_forming, h4_just = _fold(h4_forming, h4_closed, int((t_sec // H4_S) * H4_S), b_val)
+            d1_forming, d1_just = _fold(d1_forming, d1_closed, int((t_sec // D1_S) * D1_S), b_val)
+            # Acotar el histórico de cerradas (el demo usa ~60 H4 / ~15 D1)
+            if len(h4_closed) > 80:
+                del h4_closed[:-80]
+            if len(d1_closed) > 20:
+                del d1_closed[:-20]
+
+            # --- emisión throttled de la vela base + rangos ---
+            now_real = time.time()
+            do_emit = (current_candle["isFinal"] or is_new_candle
+                       or (now_real - last_sent_real_time >= throttle_seconds))
+            if do_emit:
+                await send_to_client(websocket, {"type": "backtest_candle", "data": current_candle})
+                last_sent_real_time = now_real
+            if do_emit or h4_just or d1_just:
+                await emit_ranges(b_val)
+
+            # progreso (cada ~1%)
+            if idx % max(1, total_ticks // 100) == 0 or idx == total_ticks - 1:
+                await send_to_client(websocket, {
+                    "type": "backtest_progress",
+                    "data": {"current": idx + 1, "total": total_ticks}
+                })
+
+            # sincronizar el ritmo del replay
+            target_real_time = start_real_time + (t_msc - first_tick_msc) / 1000.0 / speed
+            now_real = time.time()
+            if target_real_time > now_real:
+                await asyncio.sleep(target_real_time - now_real)
+            elif idx % 500 == 0:
+                await asyncio.sleep(0.001)  # ceder CPU
+
+        client_alive = getattr(websocket, "close_code", None) is None
+
+        # Vela final en formación si no se cerró
+        if current_candle and not current_candle["isFinal"] and _backtest_running and client_alive:
+            current_candle["isFinal"] = True
+            await send_to_client(websocket, {"type": "backtest_candle", "data": current_candle})
+
+        # Mensaje de fin (solo si el cliente sigue conectado)
+        if client_alive:
+            await send_to_client(websocket, {
+                "type": "backtest_done",
+                "data": {
+                    "winRate": 0.0,
+                    "profitFactor": 0.0,
+                    "maxDrawdown": 0.0,
+                    "sharpeRatio": 0.0,
+                    "totalTrades": 0,
+                    "unvalidatedTradesCount": 0
+                }
+            })
+        
+    except Exception as e:
+        logger.exception("Error in run_data_replay")
+        await send_to_client(websocket, {
+            "type": "backtest_error",
+            "message": str(e)
+        })
+    finally:
+        _backtest_running = False
+
 
 # [HISTORY-FIX-1] Envía historial real de MT5 (últimos N días) a un cliente.
 async def send_trade_history(websocket, days_back: int = 30):
@@ -1642,7 +1871,7 @@ async def send_trade_history(websocket, days_back: int = 30):
 
 async def handler(websocket):
     """Manejador de conexiones WebSocket entrantes."""
-    global BOT_ACTIVE, ACTIVE_BOT_SYMBOLS
+    global BOT_ACTIVE, ACTIVE_BOT_SYMBOLS, _backtest_running, _replay_gen
     logger.info(f"WS: Nuevo cliente conectado desde {websocket.remote_address}")
     CONNECTED_CLIENTS.add(websocket)
     
@@ -1717,8 +1946,14 @@ async def handler(websocket):
                 logger.info(f"WS: Mensaje recibido del cliente: {data}")
                 
                 if data.get("type") == "backtest_start":
+                    _replay_gen += 1   # supersede cualquier bucle previo
                     asyncio.create_task(run_backtest(data.get("params", {}), websocket))
                 elif data.get("type") == "backtest_stop":
+                    _backtest_running = False
+                elif data.get("type") == "data_replay_start":
+                    _replay_gen += 1   # supersede cualquier bucle previo
+                    asyncio.create_task(run_data_replay(data.get("params", {}), websocket))
+                elif data.get("type") == "data_replay_stop":
                     _backtest_running = False
                 
                 action = data.get("action")
@@ -1925,6 +2160,16 @@ async def handler(websocket):
 
                     price = tick.ask if action == "buy" else tick.bid
                     
+                    # [ORDER-FIX-1] Redondear precios a los dígitos del símbolo
+                    sym_info = mt5.symbol_info(broker_symbol)
+                    digits = sym_info.digits if sym_info else 5
+
+                    price = round(price, digits)
+                    if sl > 0:
+                        sl = round(sl, digits)
+                    if tp > 0:
+                        tp = round(tp, digits)
+
                     request = {
                         "action": mt5.TRADE_ACTION_DEAL,
                         "symbol": broker_symbol,
